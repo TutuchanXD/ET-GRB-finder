@@ -1,43 +1,17 @@
 import csv
-import importlib.util
+import importlib
 import json
-import sys
+import subprocess
 from pathlib import Path
 
 import numpy as np
 
 
-SCRIPT_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "GRB_from_fullframe_uint16_sum_template_match_noplot.py"
-)
-BIN2_SCRIPT_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py"
-)
-BIN3_SCRIPT_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "GRB_from_fullframe_uint16_sum_template_match_noplot_bin3.py"
-)
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("fullframe_screener", SCRIPT_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def load_module_from(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("grbfinder.api")
 
 
 def make_run(tmp_path: Path, n_frames: int = 4, shape=(8, 9)) -> Path:
@@ -318,6 +292,38 @@ def test_post_residual_checks_can_be_disabled_from_cli(tmp_path):
     assert row["temporal_flux_series"] == "[]"
 
 
+def test_rectangular_spatial_bin_writes_manifest_fields(tmp_path):
+    mod = load_module()
+    run = make_run(tmp_path, n_frames=4, shape=(6, 8))
+    out = tmp_path / "out"
+
+    rc = mod.main(
+        [
+            "--input-run",
+            str(run),
+            "--output-dir",
+            str(out),
+            "--spatial-bin",
+            "3x4",
+            "--window-size",
+            "2",
+            "--stride",
+            "2",
+            "--no-local-shape-check",
+            "--no-temporal-check",
+            "--keep-all-residual-candidates",
+        ]
+    )
+
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["spatial_bin_size"] is None
+    assert manifest["spatial_bin_rows"] == 3
+    assert manifest["spatial_bin_cols"] == 4
+    assert manifest["detection_shape"] == [2, 2]
+    assert manifest["cropped_input_shape"] == [6, 8]
+
+
 def test_onboard_first_window_is_template_only_without_external_template(tmp_path):
     mod = load_module()
     run = tmp_path / "run"
@@ -467,17 +473,33 @@ def test_window_budget_keeps_highest_flux_final_candidates():
     assert [row["residual_flux"] for row in selected] == [30, 20]
 
 
-def test_binned_scripts_define_independent_block_binning_coordinate_mapping():
-    for path, name, bin_size in [
-        (BIN2_SCRIPT_PATH, "binned2_screener", 2),
-        (BIN3_SCRIPT_PATH, "binned3_screener", 3),
-    ]:
-        mod = load_module_from(path, name)
-        assert mod.SPATIAL_BIN_SIZE == bin_size
-        assert mod.binned_detection_shape((9120, 8900)) == (
+def test_spatial_bin_coordinate_mapping_for_square_and_rectangular_bins():
+    mod = load_module()
+    for bin_size in [2, 3]:
+        spatial_bin = mod.SpatialBin(bin_size, bin_size)
+        assert mod.binned_detection_shape((9120, 8900), spatial_bin) == (
             9120 // bin_size,
             8900 // bin_size,
         )
-        x, y = mod.detector_center_from_bin(4, 5)
+        x, y = mod.detector_center_from_bin(4, 5, spatial_bin)
         assert x == 4 * bin_size + (bin_size - 1) / 2.0
         assert y == 5 * bin_size + (bin_size - 1) / 2.0
+
+    rectangular = mod.SpatialBin(3, 4)
+    assert mod.binned_detection_shape((9120, 8900), rectangular) == (3040, 2225)
+    assert mod.detector_center_from_bin(4, 5, rectangular) == (17.5, 16.0)
+
+
+def test_long_and_short_script_wrappers_expose_spatial_bin_help():
+    for script in [
+        "scripts/grbfind.py",
+        "scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py",
+    ]:
+        proc = subprocess.run(
+            ["python", script, "--help"],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "--spatial-bin" in proc.stdout
