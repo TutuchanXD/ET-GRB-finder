@@ -1,8 +1,8 @@
 # ET-GRB-finder
 
-`ET-GRB-finder` 是一个面向星上低缓存场景的 GRB 候选搜索流水线。当前核心实现位于 `grbfinder/`，`scripts/` 下只保留短入口脚本，并在每个脚本顶部列出完整可编辑的默认参数表 `SCRIPT_DEFAULTS`。
+`ET-GRB-finder` 是一个面向星上低缓存场景的 GRB 候选搜索流水线。实现位于 `grbfinder/`，`scripts/` 下只保留短入口脚本，并在每个脚本顶部列出完整可编辑的默认参数表 `SCRIPT_DEFAULTS`。
 
-推荐从默认 `1x1` 入口开始：
+ `1x1` 入口在：
 
 ```bash
 conda run -n etbase python scripts/grbfind.py
@@ -10,7 +10,7 @@ conda run -n etbase python scripts/grbfind.py
 
 ## 默认流水线流程
 
-以下流程以 `scripts/grbfind.py` 的默认配置为准。默认输入是实际注入 GRB 的全帧仿真结果：
+流程以 `scripts/grbfind.py` 的默认配置为准。默认输入是实际注入 GRB 的全帧仿真结果：
 
 ```text
 input_run = /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529
@@ -59,8 +59,6 @@ CSV 输出中使用闭区间端点显示，因此同一个窗口会写成：
 0-11, 12-23, 24-35, ...
 ```
 
-默认 `max_windows = 2` 表示最多保留两个原始窗口。因为第一个窗口只作为模板，默认实际只检测 `12-23` 这一块。
-
 ### 3. 选择模板窗口
 
 默认 `template_strategy = rolling-previous`。在没有指定 `template_run` 时，每个检测窗口都减去最近的完整前序窗口：
@@ -69,12 +67,6 @@ CSV 输出中使用闭区间端点显示，因此同一个窗口会写成：
 template 0-11   -> detect 12-23
 template 12-23  -> detect 24-35
 template 24-35  -> detect 36-47
-```
-
-默认 `max_windows = 2` 时只执行第一组：
-
-```text
-template 0-11 -> detect 12-23
 ```
 
 如果显式设置 `template_strategy = first-window`，则所有后续检测窗口都减第一个窗口 `0-11`。如果指定 `template_run`，则进入 paired-template 验证模式，模板来自外部模板 run 的同帧号窗口。
@@ -226,51 +218,51 @@ residual_flux = 3611813
 
 以下参数都在三个脚本的 `SCRIPT_DEFAULTS` 中显式列出。
 
-| 参数 | `grbfind.py` 默认值 | 作用 |
-| --- | --- | --- |
-| `input_run` | `DEFAULT_INPUT_RUN` | 输入 run 目录，内部应包含 `frames/frame_*.npy`。 |
-| `template_run` | `None` | 外部模板 run。为 `None` 时使用输入 run 自身按 `template_strategy` 生成模板。 |
-| `output_dir` | `DEFAULT_OUTPUT_DIR` | 输出目录。目录已存在且 `overwrite=False` 时会报错。 |
-| `truth_events_csv` | `None` | truth 事件表路径。为 `None` 时自动尝试读取 `<input_run>/events.csv`。 |
-| `truth_match_radius_px` | `12.0` | truth matching 的最大距离，单位为原图像素。 |
-| `spatial_bin` | `"1x1"` | 空间非重叠 bin 设置。可写成 `"N"` 或 `"RxC"`。 |
-| `window_size` | `12` | 每个检测窗口求和的帧数。 |
-| `stride` | `12` | 相邻窗口起点的帧步长。 |
-| `max_windows` | `2` | 最多纳入的原始窗口数，包含模板种子窗口。默认只检测一个块。 |
-| `template_strategy` | `"rolling-previous"` | 无外部模板时的模板策略。可选 `"rolling-previous"` 或 `"first-window"`。 |
-| `tile_size` | `1024` | 流式处理时的 core tile 尺寸，单位为检测网格像素。 |
-| `halo` | `12` | tile 外扩边界，用于 cutout 和连通域边界安全处理。 |
-| `input_bit_depth` | `16` | 输入整数帧的位深检查。 |
-| `max_filter_size` | `7` | 模板星源诊断检测中的局部极大值滤波尺寸。 |
-| `source_threshold_sigma` | `4.0` | 模板星源诊断检测阈值，只在模板星源 catalog 启用时使用。 |
-| `residual_threshold_sigma` | `3.0` | residual 图中像素进入候选连通域前需超过背景的 sigma 数。 |
-| `residual_min_npix` | `50` | residual 连通域最小像素数。 |
-| `residual_max_npix` | `400` | residual 连通域最大像素数。 |
-| `min_residual_peak_value` | `50000` | residual 初筛所需最小峰值。 |
-| `min_residual_flux` | `0` | residual 初筛所需最小总通量。 |
-| `min_flux_peak_ratio` | `3.0` | residual 总通量与峰值的最小比值，用于排除过尖候选。 |
-| `max_final_candidates_per_window` | `5000` | 每个检测窗口最多保留的 final 候选数。`<=0` 表示不限制。 |
-| `match_radius_px` | `0.75` | 模板星源匹配半径，用于标注候选是否靠近模板源。 |
-| `cut_half` | `9` | 局部形态 cutout 半宽；实际 cutout 尺寸约为 `2 * cut_half + 1`。 |
-| `annulus_r_in` | `6.0` | 局部背景环内半径。 |
-| `annulus_r_out` | `10.0` | 局部背景环外半径。 |
-| `local_threshold_sigma` | `3.0` | 局部 residual 连通域阈值。 |
-| `seed_radius` | `1.5` | 在局部 cutout 中选择候选对应连通域的种子半径。 |
-| `effective_npix_threshold` | `4` | 候选通过空间 footprint 条件所需的最小像素数。 |
-| `temporal_cut_half` | `5` | 时间支持 cutout 半宽。 |
-| `temporal_aperture_radius` | `3.0` | 时间序列 aperture flux 半径。 |
-| `temporal_annulus_r_in` | `5.0` | 时间序列背景环内半径。 |
-| `temporal_annulus_r_out` | `8.0` | 时间序列背景环外半径。 |
-| `temporal_sigma` | `3.0` | 判定某帧 temporal flux active 的 sigma 阈值。 |
-| `temporal_min_active_frames` | `2` | 候选通过时间支持条件所需的 active 帧数。 |
-| `cosmic_single_frame_fraction` | `0.80` | 单帧 flux 占比超过该值时更像宇宙线。 |
-| `cosmic_max_active_frames` | `1` | active 帧数不超过该值且单帧占比过高时标记为 `likely_cosmic_ray`。 |
-| `previous_match_radius_px` | `2.0` | 与上一检测块 final 候选做位置关联的半径。 |
-| `template_match_sources` | `False` | 是否构建并输出模板星源 catalog，以及标注候选最近模板源。 |
-| `local_shape_check` | `True` | 是否执行局部形态重测。 |
-| `temporal_check` | `False` | 是否执行逐帧时间支持测量。 |
-| `keep_all_residual_candidates` | `False` | 是否跳过最终 pass 条件，把所有 residual 初筛候选都写入 final 表。 |
-| `overwrite` | `False` | 输出目录存在时是否允许覆盖。 |
+| 参数                                | `grbfind.py` 默认值  | 作用                                                                             |
+| ----------------------------------- | ---------------------- | -------------------------------------------------------------------------------- |
+| `input_run`                       | `DEFAULT_INPUT_RUN`  | 输入 run 目录，内部应包含 `frames/frame_*.npy`。                               |
+| `template_run`                    | `None`               | 外部模板 run。为 `None` 时使用输入 run 自身按 `template_strategy` 生成模板。 |
+| `output_dir`                      | `DEFAULT_OUTPUT_DIR` | 输出目录。目录已存在且 `overwrite=False` 时会报错。                            |
+| `truth_events_csv`                | `None`               | truth 事件表路径。为 `None` 时自动尝试读取 `<input_run>/events.csv`。        |
+| `truth_match_radius_px`           | `12.0`               | truth matching 的最大距离，单位为原图像素。                                      |
+| `spatial_bin`                     | `"1x1"`              | 空间非重叠 bin 设置。可写成 `"N"` 或 `"RxC"`。                               |
+| `window_size`                     | `12`                 | 每个检测窗口求和的帧数。                                                         |
+| `stride`                          | `12`                 | 相邻窗口起点的帧步长。                                                           |
+| `max_windows`                     | `2`                  | 最多纳入的原始窗口数，包含模板种子窗口。默认只检测一个块。                       |
+| `template_strategy`               | `"rolling-previous"` | 无外部模板时的模板策略。可选 `"rolling-previous"` 或 `"first-window"`。      |
+| `tile_size`                       | `1024`               | 流式处理时的 core tile 尺寸，单位为检测网格像素。                                |
+| `halo`                            | `12`                 | tile 外扩边界，用于 cutout 和连通域边界安全处理。                                |
+| `input_bit_depth`                 | `16`                 | 输入整数帧的位深检查。                                                           |
+| `max_filter_size`                 | `7`                  | 模板星源诊断检测中的局部极大值滤波尺寸。                                         |
+| `source_threshold_sigma`          | `4.0`                | 模板星源诊断检测阈值，只在模板星源 catalog 启用时使用。                          |
+| `residual_threshold_sigma`        | `3.0`                | residual 图中像素进入候选连通域前需超过背景的 sigma 数。                         |
+| `residual_min_npix`               | `50`                 | residual 连通域最小像素数。                                                      |
+| `residual_max_npix`               | `400`                | residual 连通域最大像素数。                                                      |
+| `min_residual_peak_value`         | `50000`              | residual 初筛所需最小峰值。                                                      |
+| `min_residual_flux`               | `0`                  | residual 初筛所需最小总通量。                                                    |
+| `min_flux_peak_ratio`             | `3.0`                | residual 总通量与峰值的最小比值，用于排除过尖候选。                              |
+| `max_final_candidates_per_window` | `5000`               | 每个检测窗口最多保留的 final 候选数。`<=0` 表示不限制。                        |
+| `match_radius_px`                 | `0.75`               | 模板星源匹配半径，用于标注候选是否靠近模板源。                                   |
+| `cut_half`                        | `9`                  | 局部形态 cutout 半宽；实际 cutout 尺寸约为 `2 * cut_half + 1`。                |
+| `annulus_r_in`                    | `6.0`                | 局部背景环内半径。                                                               |
+| `annulus_r_out`                   | `10.0`               | 局部背景环外半径。                                                               |
+| `local_threshold_sigma`           | `3.0`                | 局部 residual 连通域阈值。                                                       |
+| `seed_radius`                     | `1.5`                | 在局部 cutout 中选择候选对应连通域的种子半径。                                   |
+| `effective_npix_threshold`        | `4`                  | 候选通过空间 footprint 条件所需的最小像素数。                                    |
+| `temporal_cut_half`               | `5`                  | 时间支持 cutout 半宽。                                                           |
+| `temporal_aperture_radius`        | `3.0`                | 时间序列 aperture flux 半径。                                                    |
+| `temporal_annulus_r_in`           | `5.0`                | 时间序列背景环内半径。                                                           |
+| `temporal_annulus_r_out`          | `8.0`                | 时间序列背景环外半径。                                                           |
+| `temporal_sigma`                  | `3.0`                | 判定某帧 temporal flux active 的 sigma 阈值。                                    |
+| `temporal_min_active_frames`      | `2`                  | 候选通过时间支持条件所需的 active 帧数。                                         |
+| `cosmic_single_frame_fraction`    | `0.80`               | 单帧 flux 占比超过该值时更像宇宙线。                                             |
+| `cosmic_max_active_frames`        | `1`                  | active 帧数不超过该值且单帧占比过高时标记为 `likely_cosmic_ray`。              |
+| `previous_match_radius_px`        | `2.0`                | 与上一检测块 final 候选做位置关联的半径。                                        |
+| `template_match_sources`          | `False`              | 是否构建并输出模板星源 catalog，以及标注候选最近模板源。                         |
+| `local_shape_check`               | `True`               | 是否执行局部形态重测。                                                           |
+| `temporal_check`                  | `False`              | 是否执行逐帧时间支持测量。                                                       |
+| `keep_all_residual_candidates`    | `False`              | 是否跳过最终 pass 条件，把所有 residual 初筛候选都写入 final 表。                |
+| `overwrite`                       | `False`              | 输出目录存在时是否允许覆盖。                                                     |
 
 `grbfind-bin2.py` 和 `grbfind-bin3.py` 的参数表相同，但针对空间 bin 后的 residual 尺度有不同默认阈值：
 
@@ -292,7 +284,3 @@ grbfind-bin3.py:
   min_residual_flux = 1000000
   min_flux_peak_ratio = 1.5
 ```
-
-## 开发验证要求
-
-以后所有不专门针对空间 binning 的代码修改，都应使用实际 injected 全帧数据通过 `scripts/grbfind.py` 跑一次 `1x1` 单块烟测。默认 `max_windows = 2` 时，这个烟测只检测 `12-23` 一个块，运行时间可控。
