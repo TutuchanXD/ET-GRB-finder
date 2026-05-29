@@ -1,10 +1,18 @@
 # Current GRB Onboard Sum-Screener Algorithm
 
-This document freezes the current design of:
+This document freezes the current design implemented in:
 
 ```text
-/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py
+/home/cxgao/ET/GRB/ET-GRB-finder/grbfinder/
 ```
+
+The preferred direct-run wrapper is:
+
+```text
+/home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py
+```
+
+Legacy long script names remain as thin wrappers for compatibility.
 
 The goal is not final GRB confirmation. The goal is onboard, low-memory, high-recall detection of suspicious positions and time windows, so buffered full-frame data can be cut into small stamps and downlinked for ground processing.
 
@@ -34,6 +42,36 @@ output_dir = /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed2026
 ```
 
 The template can be provided with `--template-run`. If no template run is provided, the first window from the input run is used as the template source. That onboard-like mode is vulnerable to first-window contamination.
+
+## 1.1 Spatial Binning And Entry Points
+
+The implementation uses a two-dimensional spatial bin setting:
+
+```text
+--spatial-bin N    # NxN
+--spatial-bin RxC  # row bin R, column bin C
+```
+
+Examples:
+
+```bash
+python scripts/grbfind.py --spatial-bin 3
+python scripts/grbfind.py --spatial-bin 3x4
+```
+
+The shorter wrappers are preferred:
+
+```text
+scripts/grbfind.py      -> 1x1 default
+scripts/grbfind-bin2.py -> 2x2 default
+scripts/grbfind-bin3.py -> 3x3 default
+```
+
+The old long filenames still exist as wrappers with the same defaults.
+
+Each detection pixel is the sum of the corresponding non-overlapping input
+block. Candidate output contains both `bin_x`/`bin_y` detection-grid
+coordinates and `x`/`y` detector coordinates derived from the block center.
 
 ## 2. Frame Windowing
 
@@ -508,6 +546,8 @@ Key coordinate and window fields:
 - `window_frame_count`
 - `x`
 - `y`
+- `bin_x`
+- `bin_y`
 
 Residual-first fields:
 
@@ -555,13 +595,19 @@ Per-window fields:
 
 Current residual-first behavior makes `initial_sources` the number of residual candidates, not the number of raw stars.
 
+The manifest records the spatial binning as:
+
+- `spatial_bin_size`: legacy square-bin value, or `null` for non-square bins.
+- `spatial_bin_rows`
+- `spatial_bin_cols`
+
 ## 15. Current Validation Snapshot
 
 The current full-frame paired-template validation command was:
 
 ```text
-PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+conda run -n etbase python \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_paired_no_template_catalog \
@@ -584,8 +630,8 @@ output_size = about 36 KB
 Validation command with post-residual checks disabled:
 
 ```text
-PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+conda run -n etbase python \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_no_post_checks \

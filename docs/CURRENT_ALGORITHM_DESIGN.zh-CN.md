@@ -1,12 +1,18 @@
 # 当前 GRB 星上 12 帧求和筛选算法设计
 
-本文档固化当前低缓存版本脚本的算法设计：
+本文档固化当前低缓存版本 `grbfinder` 包的算法设计：
 
 ```text
-/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py
-/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py
-/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin3.py
+/home/cxgao/ET/GRB/ET-GRB-finder/grbfinder/
 ```
+
+推荐直接运行的短入口是：
+
+```text
+/home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py
+```
+
+旧长文件名仍保留为很薄的兼容入口。
 
 当前算法的目标不是在星上确认一个候选一定是真实 GRB。它的目标是：在星上内存和算力受限的条件下，以较高召回率找出可疑的位置和时间窗口，使星上缓存的全幅图可以按候选位置切星并下传。真正的 GRB 判定、精细测光、PSF 拟合、伪迹排查应放在地面完成。
 
@@ -39,24 +45,35 @@ output_dir = /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed2026
 
 因此首个 12 帧窗口本身不可检测。如果首窗中发生 GRB，它会污染模板并可能在后续相减时被削弱或抵消；这是当前固定首窗模板策略的已知代价。
 
-## 1.1 三套空间采样脚本
+## 1.1 空间采样和入口脚本
 
-当前保留三套互相独立的脚本，不互相 import：
+当前核心算法只在 `grbfinder/` 中实现一份。`scripts/` 下的脚本只负责选择默认空间 binning 和调用共享流水线。
 
-| 脚本 | `SPATIAL_BIN_SIZE` | 检测网格 | 原图覆盖 |
-| --- | ---: | --- | --- |
-| `GRB_from_fullframe_uint16_sum_template_match_noplot.py` | 1 | `9120 x 8900` | 全幅 |
-| `GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py` | 2 | `4560 x 4450` | 全幅 |
-| `GRB_from_fullframe_uint16_sum_template_match_noplot_bin3.py` | 3 | `3040 x 2966` | 原图右侧最后 2 列不检测 |
+推荐短入口：
 
-2x2 和 3x3 是非重叠 block binning。每个检测像素等于原图对应 block 内像素和。脚本在读取 tile 时直接完成 block binning，再对 binned tile 做 12 帧求和，因此缓存压力按检测网格尺寸下降，而不是先形成全分辨率求和图再降采样。
+| 脚本 | 默认空间 bin | 检测网格示例 | 原图覆盖 |
+| --- | --- | --- | --- |
+| `grbfind.py` | `1x1` | `9120 x 8900` | 全幅 |
+| `grbfind-bin2.py` | `2x2` | `4560 x 4450` | 全幅 |
+| `grbfind-bin3.py` | `3x3` | `3040 x 2966` | 原图右侧最后 2 列不检测 |
+
+运行时也可以显式指定空间 binning：
+
+```bash
+python scripts/grbfind.py --spatial-bin 3
+python scripts/grbfind.py --spatial-bin 3x4
+```
+
+`--spatial-bin N` 表示 `N x N`；`--spatial-bin RxC` 表示行方向 bin `R`、列方向 bin `C`。
+
+block binning 是非重叠的。每个检测像素等于原图对应 block 内像素和。脚本在读取 tile 时直接完成 block binning，再对 binned tile 做 12 帧求和，因此缓存压力按检测网格尺寸下降，而不是先形成全分辨率求和图再降采样。
 
 候选输出同时包含：
 
 - `bin_x`, `bin_y`：检测网格坐标。
 - `x`, `y`：由 block 中心反推得到的原图坐标。
 
-对 2x2，中心坐标可能是 `.5`；对 3x3，中心坐标为 block 中心整数像素。truth matching 和下传切星使用 `x`, `y`。
+对偶数列宽的 bin，中心 `x` 坐标可能是 `.5`；对偶数行高的 bin，中心 `y` 坐标可能是 `.5`。truth matching 和下传切星使用 `x`, `y`。
 
 ## 2. 帧窗口划分
 
@@ -690,13 +707,19 @@ Residual-first 字段：
 - `initial_sources` 表示 residual 候选数，不再表示原始星源数。
 - `template_source_count` 默认是 0，除非启用 `--template-match-sources`。
 
+`manifest.json` 记录空间 binning：
+
+- `spatial_bin_size`：兼容旧方形 bin 的单值；非方形 bin 时为 `null`。
+- `spatial_bin_rows`
+- `spatial_bin_cols`
+
 ## 15. 当前验证快照
 
 当前完整全幅 paired-template 验证命令：
 
 ```text
-PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+conda run -n etbase python \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_paired_no_template_catalog \
@@ -719,8 +742,8 @@ output_size = about 36 KB
 关闭 residual 之后检查的验证命令：
 
 ```text
-PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+conda run -n etbase python \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_no_post_checks \

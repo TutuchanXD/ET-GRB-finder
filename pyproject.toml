@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "et-grb-finder"
+version = "0.1.0"
+description = "ET GRB finder pipeline utilities"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "scipy",
+]
+
+[tool.setuptools]
+packages = ["grbfinder"]

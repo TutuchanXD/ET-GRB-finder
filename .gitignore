@@ -3,10 +3,14 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 
 # Local/editor state
 .DS_Store
 .vscode/
+
+# Local planning/spec drafts
+docs/superpowers/
 
 # Runtime outputs should live under /home/cxgao/Results/GRB.
 Results/

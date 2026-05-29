@@ -2,16 +2,54 @@
 
 This directory tracks known algorithm issues and decisions for the onboard-style GRB transient screener.
 
-The current adapted script is:
+The current implementation lives in the importable package:
 
 ```text
-/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py
+/home/cxgao/ET/GRB/ET-GRB-finder/grbfinder/
 ```
+
+The preferred direct-run wrapper is:
+
+```text
+/home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py
+```
+
+Legacy long script names remain as thin compatibility wrappers.
 
 The original 501x501 prototype is left untouched:
 
 ```text
 /home/cxgao/ET/GRB/ET-GRB-finder/wenxiong-version/GRB_from_integer20_npy_template_match_sum_noplot.py
+```
+
+## Installation And Entry Points
+
+Direct script execution works from the source tree:
+
+```bash
+conda run -n etbase python scripts/grbfind.py --help
+```
+
+For editable package-style use:
+
+```bash
+conda activate etbase
+pip install -e .
+```
+
+Spatial block binning is a runtime option:
+
+```bash
+python scripts/grbfind.py --spatial-bin 3
+python scripts/grbfind.py --spatial-bin 3x4
+```
+
+The old wrappers still select their historical defaults:
+
+```text
+scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py      -> 1x1
+scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py -> 2x2
+scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin3.py -> 3x3
 ```
 
 ## Current Purpose
@@ -108,8 +146,8 @@ Local copy checks:
 Residual paired-template smoke command processed all 10 full-frame windows:
 
 ```text
-PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+conda run -n etbase python \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_paired_no_template_catalog \
