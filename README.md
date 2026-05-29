@@ -127,35 +127,18 @@ peak_npix >= effective_npix_threshold
 
 默认阈值是 `4`，比旧脚本的硬阈值更宽松。
 
-### 8. 时间支持和宇宙线标记
-
-如果 `temporal_check = True`，流水线会读取候选周围小 cutout 的逐帧数据，计算每帧 residual flux 序列。
-
-输出字段包括：
-
-```text
-temporal_active_frames
-temporal_consecutive_active_frames
-temporal_max_single_frame_fraction
-likely_cosmic_ray
-temporal_flux_series
-```
-
-`likely_cosmic_ray` 只是 advisory flag，不会默认硬拒绝候选。
-
-### 9. 最终候选选择
+### 8. 最终候选选择
 
 默认不启用 `keep_all_residual_candidates`。候选满足以下任一条件即可进入 final 表：
 
 ```text
 peak_npix >= effective_npix_threshold
-temporal_active_frames >= temporal_min_active_frames
 peak_pixel_snr >= 5
 ```
 
 如果 `keep_all_residual_candidates = True`，则所有 residual 初筛后的候选都会进入 final 表。
 
-### 10. Truth match 仅用于地面验证
+### 9. Truth match 仅用于地面验证
 
 如果输入 run 下存在 `events.csv`，流水线会自动读取它并做 truth matching。相关字段只用于地面验证，不属于星上依赖：
 
@@ -212,7 +195,7 @@ template_sources.csv
 输出目录：
 
 ```text
-/home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_1x1_default_oneblock_smoke_20260529_222112
+/home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_1x1_default_oneblock_smoke_20260530_temporal_off
 ```
 
 关键结果：
@@ -224,8 +207,8 @@ detection window = 12-23
 spatial_bin = 1x1
 windows_processed = 1
 all_windows_including_template = 2
-candidates_after_measurement = 1203
-final_candidates = 1203
+candidates_after_measurement = 1
+final_candidates = 1
 truth_matched_final_candidates = 1
 ```
 
@@ -237,8 +220,6 @@ x = 942
 y = 7441
 truth_dist_px = 0.49592883990681813
 residual_flux = 3611813
-temporal_active_frames = 11
-likely_cosmic_ray = 0
 ```
 
 ## 参数说明
@@ -263,9 +244,9 @@ likely_cosmic_ray = 0
 | `max_filter_size` | `7` | 模板星源诊断检测中的局部极大值滤波尺寸。 |
 | `source_threshold_sigma` | `4.0` | 模板星源诊断检测阈值，只在模板星源 catalog 启用时使用。 |
 | `residual_threshold_sigma` | `3.0` | residual 图中像素进入候选连通域前需超过背景的 sigma 数。 |
-| `residual_min_npix` | `2` | residual 连通域最小像素数。 |
+| `residual_min_npix` | `50` | residual 连通域最小像素数。 |
 | `residual_max_npix` | `400` | residual 连通域最大像素数。 |
-| `min_residual_peak_value` | `10000` | residual 初筛所需最小峰值。 |
+| `min_residual_peak_value` | `50000` | residual 初筛所需最小峰值。 |
 | `min_residual_flux` | `0` | residual 初筛所需最小总通量。 |
 | `min_flux_peak_ratio` | `3.0` | residual 总通量与峰值的最小比值，用于排除过尖候选。 |
 | `max_final_candidates_per_window` | `5000` | 每个检测窗口最多保留的 final 候选数。`<=0` 表示不限制。 |
@@ -287,15 +268,29 @@ likely_cosmic_ray = 0
 | `previous_match_radius_px` | `2.0` | 与上一检测块 final 候选做位置关联的半径。 |
 | `template_match_sources` | `False` | 是否构建并输出模板星源 catalog，以及标注候选最近模板源。 |
 | `local_shape_check` | `True` | 是否执行局部形态重测。 |
-| `temporal_check` | `True` | 是否执行逐帧时间支持测量。 |
+| `temporal_check` | `False` | 是否执行逐帧时间支持测量。 |
 | `keep_all_residual_candidates` | `False` | 是否跳过最终 pass 条件，把所有 residual 初筛候选都写入 final 表。 |
 | `overwrite` | `False` | 输出目录存在时是否允许覆盖。 |
 
-`grbfind-bin2.py` 和 `grbfind-bin3.py` 的参数表相同，只是默认 `spatial_bin` 和 `output_dir` 后缀不同：
+`grbfind-bin2.py` 和 `grbfind-bin3.py` 的参数表相同，但针对空间 bin 后的 residual 尺度有不同默认阈值：
 
 ```text
 grbfind-bin2.py: spatial_bin = "2x2", output_dir = DEFAULT_OUTPUT_DIR + "_bin2"
 grbfind-bin3.py: spatial_bin = "3x3", output_dir = DEFAULT_OUTPUT_DIR + "_bin3"
+```
+
+```text
+grbfind-bin2.py:
+  residual_min_npix = 12
+  min_residual_peak_value = 250000
+  min_residual_flux = 0
+  min_flux_peak_ratio = 2.0
+
+grbfind-bin3.py:
+  residual_min_npix = 6
+  min_residual_peak_value = 250000
+  min_residual_flux = 1000000
+  min_flux_peak_ratio = 1.5
 ```
 
 ## 开发验证要求
