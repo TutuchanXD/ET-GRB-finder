@@ -57,6 +57,9 @@ class ScreenerConfig:
     temporal_min_active_frames: int = 2
     cosmic_single_frame_fraction: float = 0.80
     cosmic_max_active_frames: int = 1
+    local_shape_check: bool = True
+    temporal_check: bool = True
+    keep_all_residual_candidates: bool = False
 
 
 def input_range_from_bit_depth(bit_depth: int) -> tuple[int, int]:
@@ -647,18 +650,25 @@ def scan_window(
             if row["template_match_flag"]:
                 matched_template_sources += 1
             local_x, local_y = candidate_local_xy(row, row_slice=row_slice, col_slice=col_slice)
-            local_flux, npix, peak_excess, local_bkg_med, local_bkg_sigma = measure_candidate_local_excess(
-                sum_img,
-                template_sum_img,
-                (local_x, local_y),
-                cfg,
-            )
+            if cfg.local_shape_check:
+                local_flux, npix, peak_excess, local_bkg_med, local_bkg_sigma = measure_candidate_local_excess(
+                    sum_img,
+                    template_sum_img,
+                    (local_x, local_y),
+                    cfg,
+                )
+            else:
+                local_flux = int(row.get("residual_flux", 0))
+                npix = int(row.get("residual_npix", 0))
+                peak_excess = int(row.get("residual_peak_value", 0))
+                local_bkg_med = int(source_bkg_median)
+                local_bkg_sigma = int(source_bkg_sigma)
             peak_pixel_snr = (
                 float(peak_excess / (local_bkg_sigma + 1e-12))
                 if local_bkg_sigma > 0
                 else np.nan
             )
-            if local_flux > 0 or peak_excess > 0:
+            if cfg.temporal_check and (local_flux > 0 or peak_excess > 0):
                 temporal = measure_temporal_support(
                     frame_paths,
                     template_frame_paths if paired_template else None,
@@ -676,11 +686,14 @@ def scan_window(
                     "temporal_flux_series": "[]",
                     "likely_cosmic_ray": 0,
                 }
-            pass_single_stack = int(
-                npix >= cfg.effective_npix_threshold
-                or temporal["temporal_active_frames"] >= cfg.temporal_min_active_frames
-                or (np.isfinite(peak_pixel_snr) and peak_pixel_snr >= 5.0)
-            )
+            if cfg.keep_all_residual_candidates:
+                pass_single_stack = 1
+            else:
+                pass_single_stack = int(
+                    npix >= cfg.effective_npix_threshold
+                    or temporal["temporal_active_frames"] >= cfg.temporal_min_active_frames
+                    or (np.isfinite(peak_pixel_snr) and peak_pixel_snr >= 5.0)
+                )
             rec = dict(row)
             rec.update(
                 {
@@ -700,6 +713,8 @@ def scan_window(
                     "local_bkg_sigma": int(local_bkg_sigma),
                     "peak_pixel_snr": peak_pixel_snr,
                     "effective_npix_threshold": int(cfg.effective_npix_threshold),
+                    "local_shape_check_enabled": int(cfg.local_shape_check),
+                    "temporal_check_enabled": int(cfg.temporal_check),
                     "pass_single_stack": pass_single_stack,
                     **temporal,
                 }
@@ -746,6 +761,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Build and write the static template-source catalog for nearest-source annotation.",
     )
+    parser.add_argument(
+        "--no-local-shape-check",
+        dest="local_shape_check",
+        action="store_false",
+        help="Skip 19x19 local residual morphology measurement and use residual component fields directly.",
+    )
+    parser.add_argument(
+        "--no-temporal-check",
+        dest="temporal_check",
+        action="store_false",
+        help="Skip per-frame temporal cutout measurement and cosmic-ray advisory fields.",
+    )
+    parser.add_argument(
+        "--keep-all-residual-candidates",
+        action="store_true",
+        help="Bypass final morphology/time/SNR pass filter and output every residual candidate as final.",
+    )
+    parser.set_defaults(local_shape_check=True, temporal_check=True)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
 
@@ -763,6 +796,9 @@ def config_from_args(args: argparse.Namespace) -> ScreenerConfig:
         local_threshold_sigma=args.local_threshold_sigma,
         match_radius_px=args.match_radius_px,
         effective_npix_threshold=args.effective_npix_threshold,
+        local_shape_check=args.local_shape_check,
+        temporal_check=args.temporal_check,
+        keep_all_residual_candidates=args.keep_all_residual_candidates,
     )
 
 
@@ -853,6 +889,8 @@ def main(argv: list[str] | None = None) -> int:
         "local_bkg_sigma",
         "peak_pixel_snr",
         "effective_npix_threshold",
+        "local_shape_check_enabled",
+        "temporal_check_enabled",
         "temporal_active_frames",
         "temporal_consecutive_active_frames",
         "temporal_max_single_frame_fraction",
@@ -910,6 +948,9 @@ def main(argv: list[str] | None = None) -> int:
         "effective_npix_threshold": cfg.effective_npix_threshold,
         "template_match_sources": bool(args.template_match_sources),
         "template_source_catalog_written": template_source_catalog_written,
+        "local_shape_check": bool(cfg.local_shape_check),
+        "temporal_check": bool(cfg.temporal_check),
+        "keep_all_residual_candidates": bool(cfg.keep_all_residual_candidates),
         "windows_processed": len(ranges),
         "candidates_after_measurement": len(all_rows),
         "final_candidates": len(final_rows),

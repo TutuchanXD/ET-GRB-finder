@@ -31,6 +31,23 @@ def make_run(tmp_path: Path, n_frames: int = 4, shape=(8, 9)) -> Path:
     return run
 
 
+def make_residual_run_pair(tmp_path: Path, n_frames: int = 2, shape=(12, 12)) -> tuple[Path, Path]:
+    run = tmp_path / "run"
+    template = tmp_path / "template"
+    run_frames = run / "frames"
+    template_frames = template / "frames"
+    run_frames.mkdir(parents=True)
+    template_frames.mkdir(parents=True)
+    for index in range(n_frames):
+        tmpl = np.full(shape, 100, dtype=np.uint16)
+        cur = tmpl.copy()
+        cur[5, 5] += 50
+        cur[5, 6] += 30
+        np.save(template_frames / f"frame_{index:06d}.npy", tmpl)
+        np.save(run_frames / f"frame_{index:06d}.npy", cur)
+    return run, template
+
+
 def test_frame_paths_from_current_run_layout(tmp_path):
     mod = load_module()
     run = make_run(tmp_path, n_frames=3)
@@ -236,3 +253,47 @@ def test_main_does_not_write_template_source_catalog_by_default(tmp_path):
     assert not (out / "template_sources.csv").exists()
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["template_match_sources"] is False
+
+
+def test_post_residual_checks_can_be_disabled_from_cli(tmp_path):
+    mod = load_module()
+    run, template = make_residual_run_pair(tmp_path)
+    out = tmp_path / "out"
+
+    rc = mod.main(
+        [
+            "--input-run",
+            str(run),
+            "--template-run",
+            str(template),
+            "--output-dir",
+            str(out),
+            "--window-size",
+            "2",
+            "--stride",
+            "2",
+            "--max-windows",
+            "1",
+            "--no-local-shape-check",
+            "--no-temporal-check",
+            "--keep-all-residual-candidates",
+        ]
+    )
+
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["local_shape_check"] is False
+    assert manifest["temporal_check"] is False
+    assert manifest["keep_all_residual_candidates"] is True
+    assert manifest["candidates_after_measurement"] == 1
+    assert manifest["final_candidates"] == 1
+
+    rows = list(csv.DictReader((out / "streaming_sum_transient_candidates.csv").open()))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["pass_single_stack"] == "1"
+    assert row["local_shape_check_enabled"] == "0"
+    assert row["temporal_check_enabled"] == "0"
+    assert int(row["local_excess_flux"]) == int(row["residual_flux"])
+    assert int(row["peak_npix"]) == int(row["residual_npix"])
+    assert row["temporal_flux_series"] == "[]"

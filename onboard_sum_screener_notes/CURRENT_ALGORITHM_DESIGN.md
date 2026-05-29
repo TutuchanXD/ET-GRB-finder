@@ -423,6 +423,26 @@ Meaning:
 
 This is intentionally permissive. The onboard objective is candidate generation, not final GRB confirmation.
 
+## 12.1 Explicit Post-Residual Check Switches
+
+Checks after residual candidate detection can be explicitly disabled to evaluate onboard compute and buffering cost.
+
+```text
+--no-local-shape-check
+--no-temporal-check
+--keep-all-residual-candidates
+```
+
+Meanings:
+
+- `--no-local-shape-check`: skip 19x19 local residual morphology remeasurement. Output fields are still populated, but `local_excess_flux`, `peak_npix`, and `peak_excess_value` are filled directly from `residual_flux`, `residual_npix`, and `residual_peak_value`.
+- `--no-temporal-check`: skip per-frame 11x11 temporal cutout measurement and cosmic-ray advisory calculation. Temporal fields are filled with zeros or an empty series.
+- `--keep-all-residual-candidates`: bypass the final `peak_npix` / `temporal_active_frames` / `peak_pixel_snr` pass logic and write every residual candidate to `streaming_sum_transient_candidates.csv`.
+
+All three switches are disabled by default, so the default behavior still runs local morphology measurement, temporal measurement, and final pass filtering.
+
+These switches do not change residual-first detection. They make the post-residual confirmation checks optional. If downlink budget is sufficient but onboard compute or cache is tighter, the flight configuration can keep only residual candidates and defer confirmation to the ground.
+
 ## 13. Truth Matching For Validation
 
 Truth matching is optional and for validation only. It is not part of onboard detection.
@@ -503,9 +523,11 @@ Local measurement fields:
 - `local_bkg_median`
 - `local_bkg_sigma`
 - `peak_pixel_snr`
+- `local_shape_check_enabled`
 
 Temporal fields:
 
+- `temporal_check_enabled`
 - `temporal_active_frames`
 - `temporal_consecutive_active_frames`
 - `temporal_max_single_frame_fraction`
@@ -558,6 +580,35 @@ unique_truth_event_ids_matched = 20 / 20
 template_source_catalog_written = false
 output_size = about 36 KB
 ```
+
+Validation command with post-residual checks disabled:
+
+```text
+PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
+  /home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+  --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
+  --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
+  --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_no_post_checks \
+  --truth-events-csv /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529/events.csv \
+  --tile-size 2048 --no-local-shape-check --no-temporal-check \
+  --keep-all-residual-candidates --overwrite
+```
+
+Observed result:
+
+```text
+windows_processed = 10
+candidates_after_measurement = 43
+final_candidates = 43
+truth_matched_final_candidates = 43
+unique_truth_event_ids_matched = 20 / 20
+local_shape_check = false
+temporal_check = false
+keep_all_residual_candidates = true
+output_size = about 28 KB
+```
+
+On the current injected data, disabling post-residual checks leaves the candidate count at 43. This means candidate count is currently controlled by residual-first detection; the post-residual checks mainly add morphology, timing, and cosmic-ray diagnostic fields instead of reducing candidate count.
 
 Historical raw-sum candidate detection produced about 620k candidates for a single 12-frame full-frame window. The residual-first design is the change that made candidate count compatible with onboard downlink selection.
 
@@ -621,4 +672,6 @@ The current script supports paired-template validation and first-window fallback
 | `temporal_min_active_frames` | 2 | Number of active frames sufficient for candidate pass. |
 | `cosmic_single_frame_fraction` | 0.80 | Single-frame dominance threshold for cosmic-ray advisory flag. |
 | `cosmic_max_active_frames` | 1 | Active-frame count threshold for cosmic-ray advisory flag. |
-
+| `--no-local-shape-check` | false | Explicitly disable local morphology remeasurement and avoid each candidate's 19x19 cutout check. |
+| `--no-temporal-check` | false | Explicitly disable per-frame temporal cutout checks. |
+| `--keep-all-residual-candidates` | false | Bypass final pass logic and write every residual candidate as final. |

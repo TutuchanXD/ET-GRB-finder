@@ -446,6 +446,26 @@ peak_pixel_snr threshold  = 5.0
 
 该 pass 逻辑故意偏宽松。星上只负责生成可疑候选，不负责最终确认。
 
+## 12.1 Residual 之后的显式检查开关
+
+Residual 候选检测之后的检查可以显式关闭，用于评估星上算力和缓存开销。
+
+```text
+--no-local-shape-check
+--no-temporal-check
+--keep-all-residual-candidates
+```
+
+含义：
+
+- `--no-local-shape-check`：跳过 19x19 局部 residual 形态重测。输出字段仍保留，但 `local_excess_flux`、`peak_npix`、`peak_excess_value` 直接使用 residual 连通域的 `residual_flux`、`residual_npix`、`residual_peak_value` 填充。
+- `--no-temporal-check`：跳过逐帧 11x11 cutout 时间测量，也不计算宇宙线 advisory flag。时间字段填 0 或空序列。
+- `--keep-all-residual-candidates`：跳过最终 `peak_npix` / `temporal_active_frames` / `peak_pixel_snr` pass 判断，让所有 residual 候选进入 `streaming_sum_transient_candidates.csv`。
+
+这三个开关默认都不启用，因此默认行为仍然是执行局部形态检查、执行时间检查、再应用最终 pass 逻辑。
+
+这些开关的设计目的不是改变 residual-first 检测本身，而是把 residual 之后的确认性检查变成可裁剪模块。若星上下传带宽足够、但算力或缓存更紧张，可以先关闭这些检查，只下传 residual 候选。
+
 ## 13. Truth Matching 验证逻辑
 
 Truth matching 只用于注入实验验证，不属于星上检测流程。
@@ -526,9 +546,11 @@ Residual-first 字段：
 - `local_bkg_median`
 - `local_bkg_sigma`
 - `peak_pixel_snr`
+- `local_shape_check_enabled`
 
 时间支持字段：
 
+- `temporal_check_enabled`
 - `temporal_active_frames`
 - `temporal_consecutive_active_frames`
 - `temporal_max_single_frame_fraction`
@@ -584,6 +606,35 @@ unique_truth_event_ids_matched = 20 / 20
 template_source_catalog_written = false
 output_size = about 36 KB
 ```
+
+关闭 residual 之后检查的验证命令：
+
+```text
+PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
+  /home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+  --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
+  --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
+  --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_no_post_checks \
+  --truth-events-csv /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529/events.csv \
+  --tile-size 2048 --no-local-shape-check --no-temporal-check \
+  --keep-all-residual-candidates --overwrite
+```
+
+结果：
+
+```text
+windows_processed = 10
+candidates_after_measurement = 43
+final_candidates = 43
+truth_matched_final_candidates = 43
+unique_truth_event_ids_matched = 20 / 20
+local_shape_check = false
+temporal_check = false
+keep_all_residual_candidates = true
+output_size = about 28 KB
+```
+
+在当前注入数据上，关闭 residual 后续检查后候选数仍为 43。这说明当前候选数量主要由 residual-first 检测决定；后续检查主要提供形态、时间和宇宙线诊断字段，并未进一步压低候选数量。
 
 对比历史 raw-sum 检测：
 
@@ -651,4 +702,6 @@ Residual-first 假设静态星源可以被模板干净减掉。如果指向、PS
 | `temporal_min_active_frames` | 2 | 候选通过时间支持条件所需 active 帧数。 |
 | `cosmic_single_frame_fraction` | 0.80 | 宇宙线 advisory flag 的单帧占比阈值。 |
 | `cosmic_max_active_frames` | 1 | 宇宙线 advisory flag 的 active 帧数阈值。 |
-
+| `--no-local-shape-check` | false | 显式关闭局部形态重测，节省每候选 19x19 cutout 检查。 |
+| `--no-temporal-check` | false | 显式关闭逐帧时间 cutout 检查，节省每候选多帧小 cutout 读取。 |
+| `--keep-all-residual-candidates` | false | 跳过最终 pass 判断，所有 residual 候选均进入最终候选表。 |
