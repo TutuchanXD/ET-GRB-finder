@@ -403,6 +403,45 @@ def test_temporal_support_uses_first_template_window_as_low_cache_baseline(tmp_p
     assert temporal["likely_cosmic_ray"] == 1
 
 
+def test_temporal_support_converts_detector_xy_for_binned_frames(tmp_path):
+    mod = load_module()
+    run = tmp_path / "run"
+    frames = run / "frames"
+    frames.mkdir(parents=True)
+    for index in range(6):
+        arr = np.zeros((12, 12), dtype=np.uint16)
+        if index == 2:
+            arr[4:6, 4:6] = 10
+        np.save(frames / f"frame_{index:06d}.npy", arr)
+    paths = mod.frame_paths_from_run(run)
+    cfg = mod.ScreenerConfig(
+        spatial_bin=mod.SpatialBin(2, 2),
+        window_size=2,
+        temporal_cut_half=2,
+        temporal_aperture_radius=0.1,
+        temporal_annulus_r_in=1.0,
+        temporal_annulus_r_out=2.0,
+        temporal_sigma=3.0,
+    )
+    x, y = mod.detector_center_from_bin(2, 2, cfg.spatial_bin)
+
+    temporal = mod.measure_temporal_support(
+        paths,
+        paths,
+        0,
+        2,
+        2,
+        6,
+        x,
+        y,
+        cfg,
+    )
+
+    assert json.loads(temporal["temporal_flux_series"]) == [40, 0, 0, 0]
+    assert temporal["temporal_active_frames"] == 1
+    assert temporal["likely_cosmic_ray"] == 1
+
+
 def test_previous_block_state_marks_match_without_being_a_hard_requirement():
     mod = load_module()
     previous = [

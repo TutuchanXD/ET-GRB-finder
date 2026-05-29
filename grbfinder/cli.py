@@ -41,7 +41,8 @@ def build_parser(
     parser.add_argument("--truth-match-radius-px", type=float, default=12.0)
     parser.add_argument(
         "--spatial-bin",
-        default=str(parse_spatial_bin(default_spatial_bin)),
+        type=parse_spatial_bin,
+        default=parse_spatial_bin(default_spatial_bin),
         help="Spatial block binning as N or RxC, for example 3 or 3x4.",
     )
     parser.add_argument("--window-size", type=int, default=12)

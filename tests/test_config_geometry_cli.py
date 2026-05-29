@@ -1,6 +1,6 @@
 import pytest
 
-from grbfinder.cli import parse_spatial_bin
+from grbfinder.cli import parse_args, parse_spatial_bin
 from grbfinder.config import SpatialBin
 import numpy as np
 
@@ -21,6 +21,13 @@ def test_parse_spatial_bin_rejects_invalid_values():
     for value in ["0", "-1", "3x0", "3x", "x4", "3*4", "abc"]:
         with pytest.raises(ValueError):
             parse_spatial_bin(value)
+
+
+def test_parse_args_rejects_invalid_spatial_bin_as_argparse_error():
+    with pytest.raises(SystemExit) as excinfo:
+        parse_args(["--spatial-bin", "abc"])
+
+    assert excinfo.value.code == 2
 
 
 def test_rectangular_spatial_bin_geometry():

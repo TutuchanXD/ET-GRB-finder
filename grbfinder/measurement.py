@@ -14,6 +14,13 @@ from .geometry import detection_cutout_from_frame, extract_cutout
 from .io import sum_frame_tile
 
 
+def detector_xy_to_bin_xy(x: int | float, y: int | float, cfg: ScreenerConfig) -> tuple[int, int]:
+    return (
+        int(np.floor(float(x) / cfg.spatial_bin.cols)),
+        int(np.floor(float(y) / cfg.spatial_bin.rows)),
+    )
+
+
 def measure_candidate_local_excess(
     sum_img: np.ndarray,
     template_sum_img: np.ndarray,
@@ -81,13 +88,20 @@ def measure_temporal_support(
     y: int | float,
     cfg: ScreenerConfig,
 ) -> dict:
+    bin_x, bin_y = detector_xy_to_bin_xy(x, y, cfg)
     template_mean = None
     if template_frame_paths is not None and template_frame_start < template_frame_end:
         template_sum = None
         template_count = 0
         for idx in range(template_frame_start, min(template_frame_end, len(template_frame_paths))):
             tmpl = np.load(template_frame_paths[idx], mmap_mode="r")
-            tmpl_cut, _, _ = detection_cutout_from_frame(tmpl, x, y, cfg.temporal_cut_half, cfg.spatial_bin)
+            tmpl_cut, _, _ = detection_cutout_from_frame(
+                tmpl,
+                bin_x,
+                bin_y,
+                cfg.temporal_cut_half,
+                cfg.spatial_bin,
+            )
             if template_sum is None:
                 template_sum = tmpl_cut.astype(np.float64, copy=True)
             elif template_sum.shape == tmpl_cut.shape:
@@ -101,13 +115,19 @@ def measure_temporal_support(
     fluxes: list[int] = []
     for idx in range(frame_start, frame_end):
         frame = np.load(frame_paths[idx], mmap_mode="r")
-        cut, x0, y0 = detection_cutout_from_frame(frame, x, y, cfg.temporal_cut_half, cfg.spatial_bin)
+        cut, x0, y0 = detection_cutout_from_frame(
+            frame,
+            bin_x,
+            bin_y,
+            cfg.temporal_cut_half,
+            cfg.spatial_bin,
+        )
         cut_data = cut.astype(np.float64, copy=False)
         if template_mean is not None and template_mean.shape == cut.shape:
             cut_data = cut_data - template_mean
 
         yy, xx = np.indices(cut.shape)
-        rr = np.hypot(xx - float(x - x0), yy - float(y - y0))
+        rr = np.hypot(xx - float(bin_x - x0), yy - float(bin_y - y0))
         aperture = rr <= cfg.temporal_aperture_radius
         annulus = (rr >= cfg.temporal_annulus_r_in) & (rr <= cfg.temporal_annulus_r_out)
         bkg_med = integer_median(cut_data[annulus]) if np.any(annulus) else integer_median(cut_data)
