@@ -41,9 +41,14 @@ input_run  = /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20
 output_dir = /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_sum12_streaming
 ```
 
-模板 run 可通过 `--template-run` 指定，主要用于地面诊断和理想 paired-template 对照。星上低缓存链路默认不指定 `--template-run`，脚本会使用输入 run 的第一个 12 帧窗口作为模板，并从第二个窗口开始检测。
+模板 run 可通过 `--template-run` 指定，主要用于地面诊断和理想 paired-template 对照。星上低缓存链路默认不指定 `--template-run`，由 `--template-strategy` 控制模板选择：
 
-因此首个 12 帧窗口本身不可检测。如果首窗中发生 GRB，它会污染模板并可能在后续相减时被削弱或抵消；这是当前固定首窗模板策略的已知代价。
+```text
+--template-strategy rolling-previous   # 脚本默认：每个检测窗口减最近一个完整的前序输入窗口
+--template-strategy first-window       # 旧行为 fallback：所有检测窗口都减第一个输入窗口
+```
+
+两种星上模式下，首个 12 帧窗口本身仍只作为种子模板，不参与检测。如果首窗中发生 GRB，它会污染模板并可能在后续相减时被削弱或抵消。
 
 ## 1.1 空间采样和入口脚本
 
@@ -56,6 +61,10 @@ output_dir = /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed2026
 | `grbfind.py` | `1x1` | `9120 x 8900` | 全幅 |
 | `grbfind-bin2.py` | `2x2` | `4560 x 4450` | 全幅 |
 | `grbfind-bin3.py` | `3x3` | `3040 x 2966` | 原图右侧最后 2 列不检测 |
+
+三个短入口都默认使用 `--template-strategy rolling-previous`。
+每个短入口文件顶部都有完整可编辑的 `SCRIPT_DEFAULTS` 字典，路径、窗口、模板策略、阈值、形态检查、时间检查和输出开关都在其中列出。需要调整某次运行参数时，可以直接改脚本中的对应默认值。
+三个短入口也都默认 `max_windows = 2`。在 `window_size = 12`、`stride = 12` 时，这表示 `0-11` 作为种子模板，只检测 `12-23` 这一块。
 
 运行时也可以显式指定空间 binning：
 
@@ -173,10 +182,14 @@ template_sum = sum(template_frame[i][tile] for i in same frame_start:frame_end)
 如果没有指定 `--template-run`：
 
 ```text
+--template-strategy first-window:
 template_sum = sum(input_frame[i][tile] for i in 0:min(window_size, n_frames))
+
+--template-strategy rolling-previous:
+template_sum = sum(input_frame[i][tile] for i in previous complete window)
 ```
 
-这是当前星上低缓存固定首窗模板策略。此模式下，首窗不参与检测，后续所有检测窗口都减同一个首窗模板。该链路会暴露真实帧间 CR 差异，不再出现 paired-template 把同源 CR 完全抵消的理想情况。
+两种星上低缓存模式下，首窗都只作为模板，不参与检测。该链路会暴露真实帧间 CR 差异，不再出现 paired-template 把同源 CR 完全抵消的理想情况。
 
 ## 5. Residual-First 候选检测
 
@@ -694,6 +707,8 @@ Residual-first 字段：
 - `frame_start`
 - `frame_end`
 - `window_frame_count`
+- `template_frame_start`
+- `template_frame_end`
 - `template_source_count`
 - `initial_sources`
 - `after_residual_prefilter`
@@ -712,6 +727,10 @@ Residual-first 字段：
 - `spatial_bin_size`：兼容旧方形 bin 的单值；非方形 bin 时为 `null`。
 - `spatial_bin_rows`
 - `spatial_bin_cols`
+
+## 14.3 开发烟测策略
+
+以后所有不专门针对空间 binning 的代码修改，都应通过 `scripts/grbfind.py` 跑一次 `1x1` 烟测。只修改空间 binning 行为时，可以使用对应 bin 的定向烟测；如果触及共享流水线，也应补 `1x1` 烟测。
 
 ## 15. 当前验证快照
 
@@ -796,12 +815,11 @@ Residual-first 假设静态星源可以被模板干净减掉。如果指向、PS
 
 脚本按窗口输出候选。持续时间较长或衰减较慢的事件可能在多个窗口中出现。地面流程需要按位置和时间合并候选。
 
-### 16.6 星上模板策略尚未最终确定
+### 16.6 星上模板策略仍需飞行验证
 
-当前脚本支持 paired-template 验证和第一窗口 fallback。真正星上部署仍需要明确模板策略，例如：
+当前脚本支持 paired-template 验证、固定第一窗口 fallback、以及上一完整窗口滚动模板。真正星上部署仍需要在真实指向、背景和长持续 transient 场景下验证。后续可选策略包括：
 
 - 预先上传或预先计算静态天区模板。
-- 延迟滚动模板。
 - 滚动 median 或低分位背景模板。
 - 模板相减前做姿态和光度归一化。
 
@@ -811,6 +829,8 @@ Residual-first 假设静态星源可以被模板干净减掉。如果指向、PS
 | --- | ---: | --- |
 | `window_size` | 12 | 每个检测窗口求和的帧数。 |
 | `stride` | 12 | 相邻检测窗口之间的帧步长。 |
+| `max_windows` | 脚本中为 2 | 最多纳入的原始窗口数，包含种子模板窗口。脚本默认只处理一个检测块。 |
+| `--template-strategy` | 脚本中为 `rolling-previous` | 无 `--template-run` 时的输入 run 模板策略：`first-window` 或 `rolling-previous`。 |
 | `tile_size` | 1024 | 流式处理时的 core tile 尺寸。 |
 | `halo` | 12 | tile 外扩边界，用于边缘 cutout 和连通域安全处理。 |
 | `input_bit_depth` | 16 | 输入帧的无符号整数位深检查。 |

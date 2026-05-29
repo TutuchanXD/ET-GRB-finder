@@ -12,7 +12,7 @@ The preferred direct-run wrapper is:
 /home/cxgao/ET/GRB/ET-GRB-finder/scripts/grbfind.py
 ```
 
-Legacy long script names remain as thin wrappers for compatibility.
+Only short entry-point script names are kept under `scripts/`.
 
 The goal is not final GRB confirmation. The goal is onboard, low-memory, high-recall detection of suspicious positions and time windows, so buffered full-frame data can be cut into small stamps and downlinked for ground processing.
 
@@ -41,7 +41,14 @@ input_run  = /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20
 output_dir = /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_sum12_streaming
 ```
 
-The template can be provided with `--template-run`. If no template run is provided, the first window from the input run is used as the template source. That onboard-like mode is vulnerable to first-window contamination.
+The template can be provided with `--template-run`. If no template run is provided, `--template-strategy` controls onboard-style template selection:
+
+```text
+--template-strategy rolling-previous   # script default; each detection window subtracts the latest complete prior input window
+--template-strategy first-window       # legacy fallback; all detections subtract the first input window
+```
+
+The first input window is still template-only in both onboard-style modes. A GRB in that seed window can contaminate the template and be missed.
 
 ## 1.1 Spatial Binning And Entry Points
 
@@ -67,7 +74,12 @@ scripts/grbfind-bin2.py -> 2x2 default
 scripts/grbfind-bin3.py -> 3x3 default
 ```
 
-The old long filenames still exist as wrappers with the same defaults.
+All three wrappers default to `--template-strategy rolling-previous`.
+Each wrapper also contains a complete editable `SCRIPT_DEFAULTS` dictionary, so
+thresholds and other run parameters can be changed directly in the script before
+launching a run.
+The wrappers also default to `max_windows = 2`, which keeps the first `0-11`
+window as the seed template and runs only the `12-23` detection window.
 
 Each detection pixel is the sum of the corresponding non-overlapping input
 block. Candidate output contains both `bin_x`/`bin_y` detection-grid
@@ -158,10 +170,14 @@ template_sum = sum(template_frame[i][tile] for i in same frame_start:frame_end)
 If `--template-run` is not provided:
 
 ```text
+--template-strategy first-window:
 template_sum = sum(input_frame[i][tile] for i in 0:min(window_size, n_frames))
+
+--template-strategy rolling-previous:
+template_sum = sum(input_frame[i][tile] for i in previous complete window)
 ```
 
-This fallback is only an onboard-style placeholder. A real flight pipeline needs a rolling or prebuilt template policy.
+The first input window is template-only in both onboard-style modes.
 
 ## 5. Residual-First Candidate Detection
 
@@ -587,6 +603,8 @@ Per-window fields:
 - `frame_start`
 - `frame_end`
 - `window_frame_count`
+- `template_frame_start`
+- `template_frame_end`
 - `template_source_count`
 - `initial_sources`
 - `template_matched_sources_kept`
@@ -600,6 +618,10 @@ The manifest records the spatial binning as:
 - `spatial_bin_size`: legacy square-bin value, or `null` for non-square bins.
 - `spatial_bin_rows`
 - `spatial_bin_cols`
+
+## 14.3 Development Smoke Policy
+
+Any code change that is not specifically about spatial binning should include a `1x1` smoke run through `scripts/grbfind.py`. Spatial-binning-only changes can use targeted bin smoke tests, with `1x1` added when shared pipeline behavior is touched.
 
 ## 15. Current Validation Snapshot
 
@@ -680,12 +702,11 @@ Single-pixel residual components are rejected by `residual_min_npix = 2`. Multi-
 
 The script reports candidates per window. A long or slowly decaying event can appear in multiple windows. Ground processing should merge candidates by event position and overlapping time.
 
-### 16.6 Flight Template Policy Not Finalized
+### 16.6 Flight Template Policy Still Needs Flight Validation
 
-The current script supports paired-template validation and first-window fallback. A flight version still needs an explicit template policy, such as:
+The current script supports paired-template validation, fixed first-window fallback, and rolling previous-window templates. A flight version still needs validation against realistic pointing, background, and long-duration transient cases. Possible later policies include:
 
 - pre-uploaded or precomputed static sky template,
-- delayed rolling template,
 - robust rolling median/low-percentile background,
 - separate attitude/photometric normalization before subtraction.
 
@@ -695,6 +716,8 @@ The current script supports paired-template validation and first-window fallback
 | --- | ---: | --- |
 | `window_size` | 12 | Number of frames summed per detection window. |
 | `stride` | 12 | Frame step between detection windows. |
+| `max_windows` | 2 in scripts | Maximum number of raw windows considered, including the seed template window. With the script default, only one detection block is processed. |
+| `--template-strategy` | `rolling-previous` in scripts | Input-run template strategy when no `--template-run` is supplied: `first-window` or `rolling-previous`. |
 | `tile_size` | 1024 | Core tile size for streaming full-frame processing. |
 | `halo` | 12 | Extra tile margin for boundary-safe cutouts. |
 | `input_bit_depth` | 16 | Expected unsigned input range validation. |

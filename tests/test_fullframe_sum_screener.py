@@ -1,5 +1,6 @@
 import csv
 import importlib
+import importlib.util
 import json
 import subprocess
 from pathlib import Path
@@ -9,9 +10,66 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+EXPECTED_SCRIPT_DEFAULT_KEYS = {
+    "input_run",
+    "template_run",
+    "output_dir",
+    "truth_events_csv",
+    "truth_match_radius_px",
+    "spatial_bin",
+    "window_size",
+    "stride",
+    "max_windows",
+    "template_strategy",
+    "tile_size",
+    "halo",
+    "input_bit_depth",
+    "max_filter_size",
+    "source_threshold_sigma",
+    "residual_threshold_sigma",
+    "residual_min_npix",
+    "residual_max_npix",
+    "min_residual_peak_value",
+    "min_residual_flux",
+    "min_flux_peak_ratio",
+    "max_final_candidates_per_window",
+    "match_radius_px",
+    "cut_half",
+    "annulus_r_in",
+    "annulus_r_out",
+    "local_threshold_sigma",
+    "seed_radius",
+    "effective_npix_threshold",
+    "temporal_cut_half",
+    "temporal_aperture_radius",
+    "temporal_annulus_r_in",
+    "temporal_annulus_r_out",
+    "temporal_sigma",
+    "temporal_min_active_frames",
+    "cosmic_single_frame_fraction",
+    "cosmic_max_active_frames",
+    "previous_match_radius_px",
+    "template_match_sources",
+    "local_shape_check",
+    "temporal_check",
+    "keep_all_residual_candidates",
+    "overwrite",
+}
+
 
 def load_module():
     return importlib.import_module("grbfinder.api")
+
+
+def load_script_module(script: str):
+    path = REPO_ROOT / script
+    module_name = "test_" + path.stem.replace("-", "_")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def make_run(tmp_path: Path, n_frames: int = 4, shape=(8, 9)) -> Path:
@@ -278,8 +336,15 @@ def test_post_residual_checks_can_be_disabled_from_cli(tmp_path):
     assert manifest["local_shape_check"] is False
     assert manifest["temporal_check"] is False
     assert manifest["keep_all_residual_candidates"] is True
+    assert manifest["template_strategy"] == "paired-template"
     assert manifest["candidates_after_measurement"] == 1
     assert manifest["final_candidates"] == 1
+
+    summary_rows = list(csv.DictReader((out / "streaming_sum_summary.csv").open()))
+    assert [
+        (row["frame_start"], row["frame_end"], row["template_frame_start"], row["template_frame_end"])
+        for row in summary_rows
+    ] == [("0", "1", "0", "1")]
 
     rows = list(csv.DictReader((out / "streaming_sum_transient_candidates.csv").open()))
     assert len(rows) == 1
@@ -361,6 +426,58 @@ def test_onboard_first_window_is_template_only_without_external_template(tmp_pat
 
     summary_rows = list(csv.DictReader((out / "streaming_sum_summary.csv").open()))
     assert [(row["frame_start"], row["frame_end"]) for row in summary_rows] == [("2", "3")]
+
+
+def test_rolling_previous_template_strategy_uses_previous_complete_window(tmp_path):
+    mod = load_module()
+    run = tmp_path / "run"
+    frames = run / "frames"
+    frames.mkdir(parents=True)
+    for index in range(6):
+        arr = np.full((12, 12), 100, dtype=np.uint16)
+        if index >= 2:
+            arr[5, 5] += 80
+            arr[5, 6] += 60
+        np.save(frames / f"frame_{index:06d}.npy", arr)
+    out = tmp_path / "out"
+
+    rc = mod.main(
+        [
+            "--input-run",
+            str(run),
+            "--output-dir",
+            str(out),
+            "--window-size",
+            "2",
+            "--stride",
+            "2",
+            "--template-strategy",
+            "rolling-previous",
+            "--no-local-shape-check",
+            "--no-temporal-check",
+            "--keep-all-residual-candidates",
+        ]
+    )
+
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["template_strategy"] == "rolling-previous"
+    assert manifest["template_window"] == [0, 1]
+
+    summary_rows = list(csv.DictReader((out / "streaming_sum_summary.csv").open()))
+    assert [
+        (
+            row["frame_start"],
+            row["frame_end"],
+            row["template_frame_start"],
+            row["template_frame_end"],
+            row["final_candidates"],
+        )
+        for row in summary_rows
+    ] == [
+        ("2", "3", "0", "1", "1"),
+        ("4", "5", "2", "3", "0"),
+    ]
 
 
 def test_temporal_support_uses_first_template_window_as_low_cache_baseline(tmp_path):
@@ -529,10 +646,11 @@ def test_spatial_bin_coordinate_mapping_for_square_and_rectangular_bins():
     assert mod.detector_center_from_bin(4, 5, rectangular) == (17.5, 16.0)
 
 
-def test_long_and_short_script_wrappers_expose_spatial_bin_help():
+def test_short_script_wrappers_expose_spatial_bin_help():
     for script in [
         "scripts/grbfind.py",
-        "scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py",
+        "scripts/grbfind-bin2.py",
+        "scripts/grbfind-bin3.py",
     ]:
         proc = subprocess.run(
             ["python", script, "--help"],
@@ -542,3 +660,60 @@ def test_long_and_short_script_wrappers_expose_spatial_bin_help():
             capture_output=True,
         )
         assert "--spatial-bin" in proc.stdout
+
+
+def test_short_script_wrappers_list_complete_adjustable_defaults():
+    scripts = [
+        ("scripts/grbfind.py", "1x1", ""),
+        ("scripts/grbfind-bin2.py", "2x2", "_bin2"),
+        ("scripts/grbfind-bin3.py", "3x3", "_bin3"),
+    ]
+
+    for script, spatial_bin, output_suffix in scripts:
+        module = load_script_module(script)
+        defaults = module.SCRIPT_DEFAULTS
+
+        assert set(defaults) == EXPECTED_SCRIPT_DEFAULT_KEYS
+        assert defaults["spatial_bin"] == spatial_bin
+        assert str(defaults["output_dir"]).endswith(output_suffix)
+        assert defaults["max_windows"] == 2
+        assert defaults["template_strategy"] == "rolling-previous"
+
+
+def test_short_script_wrappers_default_to_rolling_previous_template_strategy(tmp_path):
+    run = make_run(tmp_path, n_frames=6, shape=(12, 12))
+    scripts = [
+        ("scripts/grbfind.py", 1, 1),
+        ("scripts/grbfind-bin2.py", 2, 2),
+        ("scripts/grbfind-bin3.py", 3, 3),
+    ]
+
+    for script, bin_rows, bin_cols in scripts:
+        out = tmp_path / script.replace("/", "_").replace(".py", "")
+        subprocess.run(
+            [
+                "python",
+                script,
+                "--input-run",
+                str(run),
+                "--output-dir",
+                str(out),
+                "--window-size",
+                "2",
+                "--stride",
+                "2",
+                "--no-local-shape-check",
+                "--no-temporal-check",
+                "--keep-all-residual-candidates",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert manifest["template_strategy"] == "rolling-previous"
+        assert manifest["spatial_bin_rows"] == bin_rows
+        assert manifest["spatial_bin_cols"] == bin_cols
+        assert manifest["all_windows_including_template"] == 2
+        assert manifest["windows_processed"] == 1

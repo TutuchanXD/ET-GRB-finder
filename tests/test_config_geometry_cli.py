@@ -30,6 +30,19 @@ def test_parse_args_rejects_invalid_spatial_bin_as_argparse_error():
     assert excinfo.value.code == 2
 
 
+def test_parse_args_accepts_template_strategy():
+    args = parse_args(["--template-strategy", "rolling-previous"])
+
+    assert args.template_strategy == "rolling-previous"
+
+
+def test_parse_args_rejects_invalid_template_strategy_as_argparse_error():
+    with pytest.raises(SystemExit) as excinfo:
+        parse_args(["--template-strategy", "bad"])
+
+    assert excinfo.value.code == 2
+
+
 def test_rectangular_spatial_bin_geometry():
     spatial_bin = SpatialBin(3, 4)
 

@@ -93,6 +93,8 @@ SUMMARY_FIELDS = [
     "frame_start",
     "frame_end",
     "window_frame_count",
+    "template_frame_start",
+    "template_frame_end",
     "template_source_count",
     "initial_sources",
     "after_residual_prefilter",
@@ -121,7 +123,40 @@ class PipelineRequest:
     truth_match_radius_px: float = 12.0
     max_windows: int | None = None
     template_match_sources: bool = False
+    template_strategy: str = "first-window"
     overwrite: bool = False
+
+
+def template_window_pairs(
+    ranges: list[tuple[int, int]],
+    *,
+    paired_template: bool,
+    template_strategy: str,
+    seed_template_range: tuple[int, int],
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    if paired_template:
+        return [(window, window) for window in ranges]
+    if template_strategy == "first-window":
+        seed_start, seed_end = seed_template_range
+        return [
+            (window, (seed_start, seed_end))
+            for window in ranges
+            if window[0] >= seed_end and window[1] > seed_end
+        ]
+    if template_strategy != "rolling-previous":
+        raise ValueError(f"unknown template_strategy: {template_strategy}")
+
+    pairs: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    latest_prior = None
+    prior_index = 0
+    for window in ranges:
+        frame_start, _frame_end = window
+        while prior_index < len(ranges) and ranges[prior_index][1] <= frame_start:
+            latest_prior = ranges[prior_index]
+            prior_index += 1
+        if latest_prior is not None:
+            pairs.append((window, latest_prior))
+    return pairs
 
 
 def build_template_sources(
@@ -289,6 +324,8 @@ def scan_window(
         "frame_start": int(frame_start),
         "frame_end": int(frame_end - 1),
         "window_frame_count": int(frame_end - frame_start),
+        "template_frame_start": int(template_frame_start),
+        "template_frame_end": int(template_frame_end - 1),
         "initial_sources": int(initial_sources),
         "after_residual_prefilter": int(prefiltered_sources),
         "template_matched_sources_kept": int(matched_template_sources),
@@ -325,16 +362,15 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
     paired_template = request.template_run is not None
     template_frame_start = 0
     template_frame_end = min(cfg.window_size, len(template_frame_paths))
-    detection_ranges = ranges
-    if not paired_template:
-        detection_ranges = [
-            (start, end)
-            for start, end in ranges
-            if start >= template_frame_end and end > template_frame_end
-        ]
+    detection_template_ranges = template_window_pairs(
+        ranges,
+        paired_template=paired_template,
+        template_strategy=request.template_strategy,
+        seed_template_range=(template_frame_start, template_frame_end),
+    )
     template_xy = np.empty((0, 2), dtype=float)
     template_sources: list[dict] = []
-    if request.template_match_sources and not paired_template:
+    if request.template_match_sources and not paired_template and request.template_strategy == "first-window":
         template_xy, template_sources = build_template_sources(
             template_frame_paths,
             0,
@@ -363,14 +399,14 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
         SUMMARY_FIELDS,
     )
     try:
-        for frame_start, frame_end in detection_ranges:
-            current_template_start = frame_start if paired_template else template_frame_start
-            current_template_end = frame_end if paired_template else template_frame_end
-            if request.template_match_sources and paired_template:
+        for (frame_start, frame_end), (current_template_start, current_template_end) in detection_template_ranges:
+            if request.template_match_sources and (
+                paired_template or request.template_strategy == "rolling-previous"
+            ):
                 template_xy, template_sources = build_template_sources(
                     template_frame_paths,
-                    frame_start,
-                    frame_end,
+                    current_template_start,
+                    current_template_end,
                     shape,
                     cfg,
                 )
@@ -451,6 +487,7 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
         "spatial_bin_rows": int(cfg.spatial_bin.rows),
         "spatial_bin_cols": int(cfg.spatial_bin.cols),
         "dtype": str(dtype),
+        "template_strategy": "paired-template" if paired_template else request.template_strategy,
         "template_window": [int(template_frame_start), int(template_frame_end - 1)],
         "detection_starts_after_template": bool(not paired_template),
         "window_size": cfg.window_size,
@@ -474,8 +511,8 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
         "local_shape_check": bool(cfg.local_shape_check),
         "temporal_check": bool(cfg.temporal_check),
         "keep_all_residual_candidates": bool(cfg.keep_all_residual_candidates),
-        "windows_processed": len(detection_ranges),
-        "detection_windows_processed": len(detection_ranges),
+        "windows_processed": len(detection_template_ranges),
+        "detection_windows_processed": len(detection_template_ranges),
         "all_windows_including_template": len(ranges),
         "candidates_after_measurement": int(measured_count),
         "final_candidates": int(final_count),
