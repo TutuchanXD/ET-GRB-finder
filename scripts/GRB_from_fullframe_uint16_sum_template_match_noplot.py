@@ -28,6 +28,7 @@ DEFAULT_OUTPUT_DIR = Path(
 
 SUM_DTYPE = np.uint32
 LOCAL_DIFF_DTYPE = np.int64
+SPATIAL_BIN_SIZE = 1
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,10 @@ class ScreenerConfig:
     residual_threshold_sigma: float = 3.0
     residual_min_npix: int = 2
     residual_max_npix: int = 400
+    min_residual_peak_value: int = 10000
+    min_residual_flux: int = 0
+    min_flux_peak_ratio: float = 3.0
+    max_final_candidates_per_window: int = 5000
     match_radius_px: float = 0.75
     cut_half: int = 9
     annulus_r_in: float = 6.0
@@ -57,6 +62,7 @@ class ScreenerConfig:
     temporal_min_active_frames: int = 2
     cosmic_single_frame_fraction: float = 0.80
     cosmic_max_active_frames: int = 1
+    previous_match_radius_px: float = 2.0
     local_shape_check: bool = True
     temporal_check: bool = True
     keep_all_residual_candidates: bool = False
@@ -121,6 +127,59 @@ def iter_core_tiles(shape: tuple[int, int], tile_size: int) -> Iterable[tuple[in
             yield row0, row1, col0, col1
 
 
+def binned_detection_shape(frame_shape: tuple[int, int]) -> tuple[int, int]:
+    bin_size = int(SPATIAL_BIN_SIZE)
+    if bin_size <= 0:
+        raise ValueError(f"SPATIAL_BIN_SIZE must be positive, got {bin_size}")
+    return int(frame_shape[0]) // bin_size, int(frame_shape[1]) // bin_size
+
+
+def detector_center_from_bin(bin_x: int | float, bin_y: int | float) -> tuple[float | int, float | int]:
+    bin_size = int(SPATIAL_BIN_SIZE)
+    x = float(bin_x) * bin_size + (bin_size - 1) / 2.0
+    y = float(bin_y) * bin_size + (bin_size - 1) / 2.0
+    if bin_size == 1:
+        return int(round(x)), int(round(y))
+    return x, y
+
+
+def detection_tile_from_frame(
+    frame: np.ndarray,
+    row_slice: slice,
+    col_slice: slice,
+) -> np.ndarray:
+    bin_size = int(SPATIAL_BIN_SIZE)
+    if bin_size == 1:
+        return np.asarray(frame[row_slice, col_slice], dtype=SUM_DTYPE)
+
+    raw_row_slice = slice(int(row_slice.start) * bin_size, int(row_slice.stop) * bin_size)
+    raw_col_slice = slice(int(col_slice.start) * bin_size, int(col_slice.stop) * bin_size)
+    raw = np.asarray(frame[raw_row_slice, raw_col_slice], dtype=SUM_DTYPE)
+    out_h = int(row_slice.stop) - int(row_slice.start)
+    out_w = int(col_slice.stop) - int(col_slice.start)
+    if raw.shape != (out_h * bin_size, out_w * bin_size):
+        raise ValueError(
+            f"cannot block-bin raw tile shape {raw.shape} into "
+            f"{out_h}x{out_w} blocks of {bin_size}"
+        )
+    return raw.reshape(out_h, bin_size, out_w, bin_size).sum(axis=(1, 3), dtype=SUM_DTYPE)
+
+
+def detection_cutout_from_frame(
+    frame: np.ndarray,
+    x: int | float,
+    y: int | float,
+    half: int,
+) -> tuple[np.ndarray, int, int]:
+    det_h, det_w = binned_detection_shape((int(frame.shape[0]), int(frame.shape[1])))
+    x0 = max(0, int(np.floor(x)) - half)
+    x1 = min(det_w, int(np.floor(x)) + half + 1)
+    y0 = max(0, int(np.floor(y)) - half)
+    y1 = min(det_h, int(np.floor(y)) + half + 1)
+    tile = detection_tile_from_frame(frame, slice(y0, y1), slice(x0, x1))
+    return tile, x0, y0
+
+
 def expand_tile(
     row0: int,
     row1: int,
@@ -148,7 +207,7 @@ def sum_frame_tile(
     out = None
     for path in frame_paths[frame_start:frame_end]:
         frame = np.load(path, mmap_mode="r")
-        tile = np.asarray(frame[row_slice, col_slice], dtype=SUM_DTYPE)
+        tile = detection_tile_from_frame(frame, row_slice, col_slice)
         if out is None:
             out = tile.copy()
         else:
@@ -224,14 +283,17 @@ def detect_sources_on_tile(
             best_idx = int(max_idx[0])
         y_local = int(ys[best_idx])
         x_local = int(xs[best_idx])
-        y = int(row_origin + y_local)
-        x = int(col_origin + x_local)
-        if not (row0 <= y < row1 and col0 <= x < col1):
+        bin_y = int(row_origin + y_local)
+        bin_x = int(col_origin + x_local)
+        if not (row0 <= bin_y < row1 and col0 <= bin_x < col1):
             continue
+        x, y = detector_center_from_bin(bin_x, bin_y)
         rows.append(
             {
                 "x": x,
                 "y": y,
+                "bin_x": bin_x,
+                "bin_y": bin_y,
                 "source_peak_value": peak_value,
             }
         )
@@ -292,14 +354,17 @@ def detect_residual_sources_on_tile(
 
         y_local = int(ys[best_idx])
         x_local = int(xs[best_idx])
-        y = int(row_origin + y_local)
-        x = int(col_origin + x_local)
-        if not (row0 <= y < row1 and col0 <= x < col1):
+        bin_y = int(row_origin + y_local)
+        bin_x = int(col_origin + x_local)
+        if not (row0 <= bin_y < row1 and col0 <= bin_x < col1):
             continue
+        x, y = detector_center_from_bin(bin_x, bin_y)
         rows.append(
             {
                 "x": x,
                 "y": y,
+                "bin_x": bin_x,
+                "bin_y": bin_y,
                 "source_peak_value": int(sum_tile[y_local, x_local]),
                 "residual_peak_value": peak_value,
                 "residual_flux": int(
@@ -352,8 +417,42 @@ def annotate_template_matches(
     return out
 
 
+def residual_flux_peak_ratio(row: dict) -> float:
+    peak = max(int(row.get("residual_peak_value", 0)), 1)
+    return float(int(row.get("residual_flux", 0)) / peak)
+
+
+def passes_residual_prefilter(row: dict, cfg: ScreenerConfig) -> bool:
+    if cfg.keep_all_residual_candidates:
+        return True
+    if int(row.get("residual_peak_value", 0)) < int(cfg.min_residual_peak_value):
+        return False
+    if int(row.get("residual_flux", 0)) < int(cfg.min_residual_flux):
+        return False
+    if residual_flux_peak_ratio(row) < float(cfg.min_flux_peak_ratio):
+        return False
+    return True
+
+
+def select_final_rows_for_window(rows: list[dict], cfg: ScreenerConfig) -> list[dict]:
+    final_rows = [row for row in rows if int(row.get("pass_single_stack", 0)) == 1]
+    limit = int(cfg.max_final_candidates_per_window)
+    if cfg.keep_all_residual_candidates or limit <= 0 or len(final_rows) <= limit:
+        return final_rows
+    return sorted(
+        final_rows,
+        key=lambda row: (
+            int(row.get("residual_flux", 0)),
+            int(row.get("residual_peak_value", 0)),
+        ),
+        reverse=True,
+    )[:limit]
+
+
 def candidate_local_xy(row: dict, *, row_slice: slice, col_slice: slice) -> tuple[int, int]:
-    return int(row["x"]) - int(col_slice.start), int(row["y"]) - int(row_slice.start)
+    x = int(row.get("bin_x", row["x"]))
+    y = int(row.get("bin_y", row["y"]))
+    return x - int(col_slice.start), y - int(row_slice.start)
 
 
 def extract_cutout(frame: np.ndarray, x: float, y: float, half: int):
@@ -448,29 +547,45 @@ def measure_candidate_local_excess(
 def measure_temporal_support(
     frame_paths: list[Path],
     template_frame_paths: list[Path] | None,
+    template_frame_start: int,
+    template_frame_end: int,
     frame_start: int,
     frame_end: int,
-    x: int,
-    y: int,
+    x: int | float,
+    y: int | float,
     cfg: ScreenerConfig,
 ) -> dict:
+    template_mean = None
+    if template_frame_paths is not None and template_frame_start < template_frame_end:
+        template_sum = None
+        template_count = 0
+        for idx in range(template_frame_start, min(template_frame_end, len(template_frame_paths))):
+            tmpl = np.load(template_frame_paths[idx], mmap_mode="r")
+            tmpl_cut, _, _ = detection_cutout_from_frame(tmpl, x, y, cfg.temporal_cut_half)
+            if template_sum is None:
+                template_sum = tmpl_cut.astype(np.float64, copy=True)
+            elif template_sum.shape == tmpl_cut.shape:
+                template_sum += tmpl_cut.astype(np.float64, copy=False)
+            else:
+                continue
+            template_count += 1
+        if template_sum is not None and template_count > 0:
+            template_mean = template_sum / float(template_count)
+
     fluxes: list[int] = []
     for idx in range(frame_start, frame_end):
         frame = np.load(frame_paths[idx], mmap_mode="r")
-        cut, x0, y0 = extract_cutout(frame, x, y, cfg.temporal_cut_half)
-        cut_data = cut.astype(LOCAL_DIFF_DTYPE, copy=False)
-        if template_frame_paths is not None and idx < len(template_frame_paths):
-            tmpl = np.load(template_frame_paths[idx], mmap_mode="r")
-            tmpl_cut, _, _ = extract_cutout(tmpl, x, y, cfg.temporal_cut_half)
-            if tmpl_cut.shape == cut.shape:
-                cut_data = cut_data - tmpl_cut.astype(LOCAL_DIFF_DTYPE, copy=False)
+        cut, x0, y0 = detection_cutout_from_frame(frame, x, y, cfg.temporal_cut_half)
+        cut_data = cut.astype(np.float64, copy=False)
+        if template_mean is not None and template_mean.shape == cut.shape:
+            cut_data = cut_data - template_mean
 
         yy, xx = np.indices(cut.shape)
         rr = np.hypot(xx - float(x - x0), yy - float(y - y0))
         aperture = rr <= cfg.temporal_aperture_radius
         annulus = (rr >= cfg.temporal_annulus_r_in) & (rr <= cfg.temporal_annulus_r_out)
         bkg_med = integer_median(cut_data[annulus]) if np.any(annulus) else integer_median(cut_data)
-        flux = int(cut_data[aperture].sum(dtype=LOCAL_DIFF_DTYPE) - bkg_med * int(aperture.sum()))
+        flux = int(round(float(cut_data[aperture].sum()) - bkg_med * int(aperture.sum())))
         fluxes.append(max(flux, 0))
 
     if not fluxes:
@@ -502,6 +617,78 @@ def measure_temporal_support(
         "temporal_consecutive_active_frames": int(best_run),
         "temporal_max_single_frame_fraction": max_fraction,
         "temporal_flux_series": json.dumps([int(v) for v in flux_arr], separators=(",", ":")),
+        "likely_cosmic_ray": likely_cosmic,
+    }
+
+
+def build_temporal_peak_maps_for_tile(
+    frame_paths: list[Path],
+    frame_start: int,
+    frame_end: int,
+    template_sum_img: np.ndarray,
+    template_frame_count: int,
+    row_slice: slice,
+    col_slice: slice,
+    cfg: ScreenerConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if template_frame_count <= 0:
+        raise ValueError("template_frame_count must be positive")
+    active_count = np.zeros(template_sum_img.shape, dtype=np.uint8)
+    positive_total = np.zeros(template_sum_img.shape, dtype=np.int64)
+    positive_peak = np.zeros(template_sum_img.shape, dtype=np.int64)
+    template_scaled = template_sum_img.astype(LOCAL_DIFF_DTYPE, copy=False)
+    for idx in range(frame_start, frame_end):
+        current = sum_frame_tile(frame_paths, idx, idx + 1, row_slice, col_slice).astype(
+            LOCAL_DIFF_DTYPE,
+            copy=False,
+        )
+        diff_scaled = current * int(template_frame_count) - template_scaled
+        med, sigma = robust_integer_sigma(diff_scaled)
+        if sigma <= 0:
+            threshold = max(int(med), 0)
+        else:
+            threshold = int(med + cfg.temporal_sigma * sigma)
+        positive = np.where(diff_scaled > threshold, diff_scaled, 0)
+        positive_total += positive
+        positive_peak = np.maximum(positive_peak, positive)
+        active_count += positive > 0
+    return active_count, positive_total, positive_peak
+
+
+def measure_temporal_support_from_peak_maps(
+    active_count: np.ndarray,
+    positive_total: np.ndarray,
+    positive_peak: np.ndarray,
+    local_x: int,
+    local_y: int,
+    cfg: ScreenerConfig,
+) -> dict:
+    if (
+        local_y < 0
+        or local_y >= active_count.shape[0]
+        or local_x < 0
+        or local_x >= active_count.shape[1]
+    ):
+        return {
+            "temporal_active_frames": 0,
+            "temporal_consecutive_active_frames": 0,
+            "temporal_max_single_frame_fraction": 0.0,
+            "temporal_flux_series": "[]",
+            "likely_cosmic_ray": 0,
+        }
+    total = int(positive_total[local_y, local_x])
+    peak = int(positive_peak[local_y, local_x])
+    active = int(active_count[local_y, local_x])
+    max_fraction = float(peak / total) if total > 0 else 0.0
+    likely_cosmic = int(
+        active <= cfg.cosmic_max_active_frames
+        and max_fraction >= cfg.cosmic_single_frame_fraction
+    )
+    return {
+        "temporal_active_frames": active,
+        "temporal_consecutive_active_frames": active,
+        "temporal_max_single_frame_fraction": max_fraction,
+        "temporal_flux_series": "[]",
         "likely_cosmic_ray": likely_cosmic,
     }
 
@@ -562,6 +749,63 @@ def annotate_truth_matches(
     return out
 
 
+def annotate_previous_block_matches(
+    candidates: list[dict],
+    previous_candidates: list[dict],
+    radius_px: float,
+) -> list[dict]:
+    if not previous_candidates:
+        out = []
+        for row in candidates:
+            rec = dict(row)
+            rec.update(
+                {
+                    "previous_block_match_flag": 0,
+                    "previous_block_match_dist_px": np.nan,
+                    "previous_block_match_frame_start": "",
+                    "previous_block_match_frame_end": "",
+                    "track_length": 1,
+                }
+            )
+            out.append(rec)
+        return out
+
+    prev_xy = np.asarray(
+        [(float(row["x"]), float(row["y"])) for row in previous_candidates],
+        dtype=float,
+    )
+    tree = cKDTree(prev_xy)
+    out = []
+    for row in candidates:
+        dist, idx = tree.query([float(row["x"]), float(row["y"])], k=1)
+        matched = bool(float(dist) <= float(radius_px))
+        prev = previous_candidates[int(idx)]
+        rec = dict(row)
+        rec.update(
+            {
+                "previous_block_match_flag": int(matched),
+                "previous_block_match_dist_px": float(dist) if matched else np.nan,
+                "previous_block_match_frame_start": prev.get("frame_start", "") if matched else "",
+                "previous_block_match_frame_end": prev.get("frame_end", "") if matched else "",
+                "track_length": int(prev.get("track_length", 1)) + 1 if matched else 1,
+            }
+        )
+        out.append(rec)
+    return out
+
+
+def classify_candidate_priority(row: dict, cfg: ScreenerConfig) -> str:
+    if int(row.get("previous_block_match_flag", 0)) == 1:
+        return "confirmed_previous_block"
+    if int(row.get("temporal_active_frames", 0)) >= int(cfg.temporal_min_active_frames):
+        return "confirmed_current_block_temporal"
+    if int(row.get("likely_cosmic_ray", 0)) == 1:
+        return "low_priority_likely_cosmic"
+    if int(row.get("pass_single_stack", 0)) == 1:
+        return "single_block_psf_like"
+    return "filtered"
+
+
 def save_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -569,6 +813,14 @@ def save_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def write_csv_header(path: Path, fieldnames: list[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", newline="", encoding="utf-8")
+    writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    return handle, writer
 
 
 def build_template_sources(
@@ -611,29 +863,34 @@ def scan_window(
     shape: tuple[int, int],
     cfg: ScreenerConfig,
     *,
-    paired_template: bool,
+    template_frame_start: int,
+    template_frame_end: int,
 ) -> tuple[list[dict], dict]:
     measured: list[dict] = []
     initial_sources = 0
+    prefiltered_sources = 0
     matched_template_sources = 0
     for row0, row1, col0, col1 in iter_core_tiles(shape, cfg.tile_size):
         row_slice, col_slice = expand_tile(row0, row1, col0, col1, shape, cfg.halo)
         sum_img = sum_frame_tile(frame_paths, frame_start, frame_end, row_slice, col_slice)
-        if paired_template:
-            template_sum_img = sum_frame_tile(
-                template_frame_paths,
+        template_sum_img = sum_frame_tile(
+            template_frame_paths,
+            template_frame_start,
+            template_frame_end,
+            row_slice,
+            col_slice,
+        )
+        temporal_maps = None
+        if cfg.temporal_check:
+            temporal_maps = build_temporal_peak_maps_for_tile(
+                frame_paths,
                 frame_start,
                 frame_end,
+                template_sum_img,
+                template_frame_end - template_frame_start,
                 row_slice,
                 col_slice,
-            )
-        else:
-            template_sum_img = sum_frame_tile(
-                template_frame_paths,
-                0,
-                min(cfg.window_size, len(template_frame_paths)),
-                row_slice,
-                col_slice,
+                cfg,
             )
 
         sources, source_threshold, source_bkg_median, source_bkg_sigma = detect_residual_sources_on_tile(
@@ -645,6 +902,11 @@ def scan_window(
             cfg=cfg,
         )
         initial_sources += len(sources)
+        for source in sources:
+            source["flux_peak_ratio"] = residual_flux_peak_ratio(source)
+            source["residual_prefilter_pass"] = int(passes_residual_prefilter(source, cfg))
+        sources = [source for source in sources if int(source["residual_prefilter_pass"]) == 1]
+        prefiltered_sources += len(sources)
         annotated = annotate_template_matches(sources, template_xy, cfg.match_radius_px)
         for row in annotated:
             if row["template_match_flag"]:
@@ -668,14 +930,13 @@ def scan_window(
                 if local_bkg_sigma > 0
                 else np.nan
             )
-            if cfg.temporal_check and (local_flux > 0 or peak_excess > 0):
-                temporal = measure_temporal_support(
-                    frame_paths,
-                    template_frame_paths if paired_template else None,
-                    frame_start,
-                    frame_end,
-                    int(row["x"]),
-                    int(row["y"]),
+            if cfg.temporal_check and temporal_maps is not None and (local_flux > 0 or peak_excess > 0):
+                temporal = measure_temporal_support_from_peak_maps(
+                    temporal_maps[0],
+                    temporal_maps[1],
+                    temporal_maps[2],
+                    local_x,
+                    local_y,
                     cfg,
                 )
             else:
@@ -706,6 +967,8 @@ def scan_window(
                     "residual_peak_value": int(row.get("residual_peak_value", 0)),
                     "residual_flux": int(row.get("residual_flux", 0)),
                     "residual_npix": int(row.get("residual_npix", 0)),
+                    "flux_peak_ratio": float(row.get("flux_peak_ratio", residual_flux_peak_ratio(row))),
+                    "residual_prefilter_pass": int(row.get("residual_prefilter_pass", 1)),
                     "local_excess_flux": int(local_flux),
                     "peak_npix": int(npix),
                     "peak_excess_value": int(peak_excess),
@@ -725,6 +988,7 @@ def scan_window(
         "frame_end": int(frame_end - 1),
         "window_frame_count": int(frame_end - frame_start),
         "initial_sources": int(initial_sources),
+        "after_residual_prefilter": int(prefiltered_sources),
         "template_matched_sources_kept": int(matched_template_sources),
         "after_measurement": int(len(measured)),
         "final_candidates": int(sum(row["pass_single_stack"] == 1 for row in measured)),
@@ -753,8 +1017,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--residual-threshold-sigma", type=float, default=3.0)
     parser.add_argument("--residual-min-npix", type=int, default=2)
     parser.add_argument("--residual-max-npix", type=int, default=400)
+    parser.add_argument("--min-residual-peak-value", type=int, default=10000)
+    parser.add_argument("--min-residual-flux", type=int, default=0)
+    parser.add_argument("--min-flux-peak-ratio", type=float, default=3.0)
+    parser.add_argument("--max-final-candidates-per-window", type=int, default=5000)
     parser.add_argument("--local-threshold-sigma", type=float, default=3.0)
     parser.add_argument("--match-radius-px", type=float, default=0.75)
+    parser.add_argument("--previous-match-radius-px", type=float, default=2.0)
     parser.add_argument("--effective-npix-threshold", type=int, default=4)
     parser.add_argument(
         "--template-match-sources",
@@ -793,8 +1062,13 @@ def config_from_args(args: argparse.Namespace) -> ScreenerConfig:
         residual_threshold_sigma=args.residual_threshold_sigma,
         residual_min_npix=args.residual_min_npix,
         residual_max_npix=args.residual_max_npix,
+        min_residual_peak_value=args.min_residual_peak_value,
+        min_residual_flux=args.min_residual_flux,
+        min_flux_peak_ratio=args.min_flux_peak_ratio,
+        max_final_candidates_per_window=args.max_final_candidates_per_window,
         local_threshold_sigma=args.local_threshold_sigma,
         match_radius_px=args.match_radius_px,
+        previous_match_radius_px=args.previous_match_radius_px,
         effective_npix_threshold=args.effective_npix_threshold,
         local_shape_check=args.local_shape_check,
         temporal_check=args.temporal_check,
@@ -811,17 +1085,28 @@ def main(argv: list[str] | None = None) -> int:
 
     frame_paths = frame_paths_from_run(args.input_run)
     template_frame_paths = frame_paths_from_run(args.template_run or args.input_run)
-    shape, dtype = frame_shape_and_dtype(frame_paths)
+    input_shape, dtype = frame_shape_and_dtype(frame_paths)
     template_shape, _template_dtype = frame_shape_and_dtype(template_frame_paths)
-    if template_shape != shape:
-        raise ValueError(f"template shape {template_shape} does not match input shape {shape}")
+    if template_shape != input_shape:
+        raise ValueError(f"template shape {template_shape} does not match input shape {input_shape}")
     validate_frame_range(frame_paths, cfg.input_bit_depth)
+    shape = binned_detection_shape(input_shape)
+    cropped_input_shape = [shape[0] * SPATIAL_BIN_SIZE, shape[1] * SPATIAL_BIN_SIZE]
 
     ranges = window_ranges(len(frame_paths), cfg.window_size, cfg.stride)
     if args.max_windows is not None:
         ranges = ranges[: int(args.max_windows)]
 
     paired_template = args.template_run is not None
+    template_frame_start = 0
+    template_frame_end = min(cfg.window_size, len(template_frame_paths))
+    detection_ranges = ranges
+    if not paired_template:
+        detection_ranges = [
+            (start, end)
+            for start, end in ranges
+            if start >= template_frame_end and end > template_frame_end
+        ]
     template_xy = np.empty((0, 2), dtype=float)
     template_sources: list[dict] = []
     if args.template_match_sources and not paired_template:
@@ -833,36 +1118,8 @@ def main(argv: list[str] | None = None) -> int:
             cfg,
         )
 
-    all_rows: list[dict] = []
-    summary_rows: list[dict] = []
-    for frame_start, frame_end in ranges:
-        if args.template_match_sources and paired_template:
-            template_xy, template_sources = build_template_sources(
-                template_frame_paths,
-                frame_start,
-                frame_end,
-                shape,
-                cfg,
-            )
-        rows, summary = scan_window(
-            frame_paths,
-            template_frame_paths,
-            template_xy,
-            frame_start,
-            frame_end,
-            shape,
-            cfg,
-            paired_template=paired_template,
-        )
-        summary["template_source_count"] = int(len(template_xy))
-        all_rows.extend(rows)
-        summary_rows.append(summary)
-
-    final_rows = [row for row in all_rows if row["pass_single_stack"] == 1]
     truth_path = args.truth_events_csv or default_truth_path(args.input_run)
     truth_events = load_truth_events(truth_path)
-    all_rows = annotate_truth_matches(all_rows, truth_events, args.truth_match_radius_px)
-    final_rows = annotate_truth_matches(final_rows, truth_events, args.truth_match_radius_px)
 
     measured_fields = [
         "frame_start",
@@ -870,6 +1127,8 @@ def main(argv: list[str] | None = None) -> int:
         "window_frame_count",
         "x",
         "y",
+        "bin_x",
+        "bin_y",
         "source_peak_value",
         "nearest_template_dist_px",
         "nearest_template_x",
@@ -882,6 +1141,8 @@ def main(argv: list[str] | None = None) -> int:
         "residual_peak_value",
         "residual_flux",
         "residual_npix",
+        "flux_peak_ratio",
+        "residual_prefilter_pass",
         "local_excess_flux",
         "peak_npix",
         "peak_excess_value",
@@ -895,6 +1156,12 @@ def main(argv: list[str] | None = None) -> int:
         "temporal_consecutive_active_frames",
         "temporal_max_single_frame_fraction",
         "likely_cosmic_ray",
+        "previous_block_match_flag",
+        "previous_block_match_dist_px",
+        "previous_block_match_frame_start",
+        "previous_block_match_frame_end",
+        "track_length",
+        "candidate_priority",
         "pass_single_stack",
         "truth_match_flag",
         "truth_event_id",
@@ -907,13 +1174,97 @@ def main(argv: list[str] | None = None) -> int:
         "window_frame_count",
         "template_source_count",
         "initial_sources",
+        "after_residual_prefilter",
         "template_matched_sources_kept",
+        "previous_block_matches",
         "after_measurement",
         "final_candidates",
     ]
-    save_csv(args.output_dir / "streaming_sum_candidates_after_measurement.csv", all_rows, measured_fields)
-    save_csv(args.output_dir / "streaming_sum_transient_candidates.csv", final_rows, measured_fields)
-    save_csv(args.output_dir / "streaming_sum_summary.csv", summary_rows, summary_fields)
+
+    measured_count = 0
+    final_count = 0
+    truth_matched_final_count = 0
+    previous_window_rows: list[dict] = []
+    measured_handle, measured_writer = write_csv_header(
+        args.output_dir / "streaming_sum_candidates_after_measurement.csv",
+        measured_fields,
+    )
+    final_handle, final_writer = write_csv_header(
+        args.output_dir / "streaming_sum_transient_candidates.csv",
+        measured_fields,
+    )
+    summary_handle, summary_writer = write_csv_header(
+        args.output_dir / "streaming_sum_summary.csv",
+        summary_fields,
+    )
+    try:
+        for frame_start, frame_end in detection_ranges:
+            current_template_start = frame_start if paired_template else template_frame_start
+            current_template_end = frame_end if paired_template else template_frame_end
+            if args.template_match_sources and paired_template:
+                template_xy, template_sources = build_template_sources(
+                    template_frame_paths,
+                    frame_start,
+                    frame_end,
+                    shape,
+                    cfg,
+                )
+            rows, summary = scan_window(
+                frame_paths,
+                template_frame_paths,
+                template_xy,
+                frame_start,
+                frame_end,
+                shape,
+                cfg,
+                template_frame_start=current_template_start,
+                template_frame_end=current_template_end,
+            )
+            rows = annotate_previous_block_matches(
+                rows,
+                previous_window_rows,
+                cfg.previous_match_radius_px,
+            )
+            if not cfg.keep_all_residual_candidates:
+                for row in rows:
+                    if int(row.get("previous_block_match_flag", 0)) == 1:
+                        row["pass_single_stack"] = 1
+            for row in rows:
+                row["candidate_priority"] = classify_candidate_priority(row, cfg)
+            rows = annotate_truth_matches(rows, truth_events, args.truth_match_radius_px)
+            final_rows = select_final_rows_for_window(rows, cfg)
+
+            summary["final_candidates"] = int(len(final_rows))
+            summary["previous_block_matches"] = int(
+                sum(row.get("previous_block_match_flag", 0) == 1 for row in rows)
+            )
+            summary["template_source_count"] = int(len(template_xy))
+            for row in rows:
+                measured_writer.writerow(row)
+            for row in final_rows:
+                final_writer.writerow(row)
+            summary_writer.writerow(summary)
+
+            measured_count += len(rows)
+            final_count += len(final_rows)
+            truth_matched_final_count += int(
+                sum(row.get("truth_match_flag", 0) == 1 for row in final_rows)
+            )
+            previous_window_rows = [
+                {
+                    "x": row["x"],
+                    "y": row["y"],
+                    "frame_start": row["frame_start"],
+                    "frame_end": row["frame_end"],
+                    "track_length": row.get("track_length", 1),
+                }
+                for row in final_rows
+            ]
+    finally:
+        measured_handle.close()
+        final_handle.close()
+        summary_handle.close()
+
     template_source_catalog_written = bool(args.template_match_sources)
     if template_source_catalog_written:
         save_csv(
@@ -933,8 +1284,14 @@ def main(argv: list[str] | None = None) -> int:
         "template_run": str(args.template_run) if args.template_run else None,
         "output_dir": str(args.output_dir),
         "truth_events_csv": str(truth_path) if truth_path else None,
-        "shape": list(shape),
+        "shape": list(input_shape),
+        "input_shape": list(input_shape),
+        "detection_shape": list(shape),
+        "cropped_input_shape": cropped_input_shape,
+        "spatial_bin_size": int(SPATIAL_BIN_SIZE),
         "dtype": str(dtype),
+        "template_window": [int(template_frame_start), int(template_frame_end - 1)],
+        "detection_starts_after_template": bool(not paired_template),
         "window_size": cfg.window_size,
         "stride": cfg.stride,
         "tile_size": cfg.tile_size,
@@ -943,18 +1300,25 @@ def main(argv: list[str] | None = None) -> int:
         "residual_threshold_sigma": cfg.residual_threshold_sigma,
         "residual_min_npix": cfg.residual_min_npix,
         "residual_max_npix": cfg.residual_max_npix,
+        "min_residual_peak_value": cfg.min_residual_peak_value,
+        "min_residual_flux": cfg.min_residual_flux,
+        "min_flux_peak_ratio": cfg.min_flux_peak_ratio,
+        "max_final_candidates_per_window": cfg.max_final_candidates_per_window,
         "local_threshold_sigma": cfg.local_threshold_sigma,
         "match_radius_px": cfg.match_radius_px,
+        "previous_match_radius_px": cfg.previous_match_radius_px,
         "effective_npix_threshold": cfg.effective_npix_threshold,
         "template_match_sources": bool(args.template_match_sources),
         "template_source_catalog_written": template_source_catalog_written,
         "local_shape_check": bool(cfg.local_shape_check),
         "temporal_check": bool(cfg.temporal_check),
         "keep_all_residual_candidates": bool(cfg.keep_all_residual_candidates),
-        "windows_processed": len(ranges),
-        "candidates_after_measurement": len(all_rows),
-        "final_candidates": len(final_rows),
-        "truth_matched_final_candidates": int(sum(row.get("truth_match_flag", 0) == 1 for row in final_rows)),
+        "windows_processed": len(detection_ranges),
+        "detection_windows_processed": len(detection_ranges),
+        "all_windows_including_template": len(ranges),
+        "candidates_after_measurement": int(measured_count),
+        "final_candidates": int(final_count),
+        "truth_matched_final_candidates": int(truth_matched_final_count),
         "notes": (
             "Template-matched sources are kept as template_source_brightening candidates. "
             "likely_cosmic_ray is an advisory flag, not a hard rejection."
@@ -967,9 +1331,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Input run: {args.input_run}")
     print(f"Template run: {args.template_run or '(first input window)'}")
     print(f"Output dir: {args.output_dir}")
-    print(f"Windows processed: {len(ranges)}")
-    print(f"Candidates after measurement: {len(all_rows)}")
-    print(f"Final candidates: {len(final_rows)}")
+    print(f"Windows processed: {len(detection_ranges)}")
+    print(f"Candidates after measurement: {measured_count}")
+    print(f"Final candidates: {final_count}")
     print(f"Truth-matched final candidates: {manifest['truth_matched_final_candidates']}")
     return 0
 

@@ -1,9 +1,11 @@
 # 当前 GRB 星上 12 帧求和筛选算法设计
 
-本文档固化当前脚本的算法设计：
+本文档固化当前低缓存版本脚本的算法设计：
 
 ```text
-/home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py
+/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py
+/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py
+/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot_bin3.py
 ```
 
 当前算法的目标不是在星上确认一个候选一定是真实 GRB。它的目标是：在星上内存和算力受限的条件下，以较高召回率找出可疑的位置和时间窗口，使星上缓存的全幅图可以按候选位置切星并下传。真正的 GRB 判定、精细测光、PSF 拟合、伪迹排查应放在地面完成。
@@ -33,7 +35,28 @@ input_run  = /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20
 output_dir = /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_sum12_streaming
 ```
 
-模板 run 可通过 `--template-run` 指定。如果不指定模板 run，脚本会使用输入 run 的第一个窗口作为模板。这个 fallback 更接近星上占位逻辑，但有明显风险：如果第一个窗口中已经有 GRB，模板会被污染，事件可能被减掉。
+模板 run 可通过 `--template-run` 指定，主要用于地面诊断和理想 paired-template 对照。星上低缓存链路默认不指定 `--template-run`，脚本会使用输入 run 的第一个 12 帧窗口作为模板，并从第二个窗口开始检测。
+
+因此首个 12 帧窗口本身不可检测。如果首窗中发生 GRB，它会污染模板并可能在后续相减时被削弱或抵消；这是当前固定首窗模板策略的已知代价。
+
+## 1.1 三套空间采样脚本
+
+当前保留三套互相独立的脚本，不互相 import：
+
+| 脚本 | `SPATIAL_BIN_SIZE` | 检测网格 | 原图覆盖 |
+| --- | ---: | --- | --- |
+| `GRB_from_fullframe_uint16_sum_template_match_noplot.py` | 1 | `9120 x 8900` | 全幅 |
+| `GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py` | 2 | `4560 x 4450` | 全幅 |
+| `GRB_from_fullframe_uint16_sum_template_match_noplot_bin3.py` | 3 | `3040 x 2966` | 原图右侧最后 2 列不检测 |
+
+2x2 和 3x3 是非重叠 block binning。每个检测像素等于原图对应 block 内像素和。脚本在读取 tile 时直接完成 block binning，再对 binned tile 做 12 帧求和，因此缓存压力按检测网格尺寸下降，而不是先形成全分辨率求和图再降采样。
+
+候选输出同时包含：
+
+- `bin_x`, `bin_y`：检测网格坐标。
+- `x`, `y`：由 block 中心反推得到的原图坐标。
+
+对 2x2，中心坐标可能是 `.5`；对 3x3，中心坐标为 block 中心整数像素。truth matching 和下传切星使用 `x`, `y`。
 
 ## 2. 帧窗口划分
 
@@ -49,6 +72,12 @@ stride      = 12
 ```text
 0-11, 12-23, ..., 108-119
 ```
+
+星上固定首窗模板模式下：
+
+- `0-11` 只用于模板。
+- 实际检测窗口从 `12-23` 开始。
+- 120 帧一共处理 9 个检测窗口。
 
 代码内部窗口使用半开区间：
 
@@ -130,7 +159,7 @@ template_sum = sum(template_frame[i][tile] for i in same frame_start:frame_end)
 template_sum = sum(input_frame[i][tile] for i in 0:min(window_size, n_frames))
 ```
 
-这个无模板 fallback 只是当前脚本支持的模式，不应视为最终星上模板策略。
+这是当前星上低缓存固定首窗模板策略。此模式下，首窗不参与检测，后续所有检测窗口都减同一个首窗模板。该链路会暴露真实帧间 CR 差异，不再出现 paired-template 把同源 CR 完全抵消的理想情况。
 
 ## 5. Residual-First 候选检测
 
@@ -222,6 +251,40 @@ residual_max_npix = 400
 - `residual_max_npix = 400`：去掉过大的正残差区域。这类区域更可能来自背景失配、大面积坏区、严重饱和或模板问题。
 
 这一步是星上友好的简单形态筛选。它不是最终天体物理分类。
+
+## 6.1 残差初筛和窗口预算
+
+固定首窗模板会产生大量帧间残差，单靠 `residual_min_npix` 和局部形态检查无法把候选数压到可下传规模。当前低缓存版本在 residual 连通域之后、局部形态和 temporal map 之前增加一层只依赖连通域统计量的硬初筛：
+
+```text
+residual_peak_value >= min_residual_peak_value
+residual_flux       >= min_residual_flux
+residual_flux / residual_peak_value >= min_flux_peak_ratio
+```
+
+默认值：
+
+```text
+min_residual_peak_value = 10000
+min_residual_flux       = 0
+min_flux_peak_ratio     = 3.0
+```
+
+含义：
+
+- `min_residual_peak_value`：剔除残差峰值太弱的候选。固定首窗模板下，这一步是压低候选数最有效的开关。
+- `min_residual_flux`：可选的总残差通量阈值，默认不额外限制。
+- `min_flux_peak_ratio`：要求候选不能过于尖锐。PSF 星斑的总 flux 通常应明显大于单像素 peak；过小的比值更像尖锐 CR 或坏点。
+
+初筛发生在每个 tile 内，先于 19x19 局部形态检查，因此能直接减少后续计算量。显式设置 `--keep-all-residual-candidates` 时会绕过该初筛，用于诊断原始 residual 候选分布。
+
+最终输出还受每窗口候选预算限制：
+
+```text
+max_final_candidates_per_window = 5000
+```
+
+当某个 12 帧检测窗口通过最终 pass 的候选数超过该值时，脚本按 `residual_flux` 从高到低保留前 `K` 个候选。设置为 `0` 或负数表示不限制。
 
 ## 7. 候选位置选择
 
@@ -378,7 +441,13 @@ temporal_min_active_frames = 2
 aperture_sum - annulus_median * aperture_npix
 ```
 
-如果提供了 paired template，逐帧 cutout 会先减去对应模板帧 cutout。
+逐帧 cutout 会先减去模板窗口的平均 cutout：
+
+```text
+per_frame_residual = current_frame_cutout - mean(template_window_cutouts)
+```
+
+这使候选级时间序列只需要小 cutout 级读入，不需要保存全幅多帧 cube。该时间序列主要用于识别单帧 CR：如果 12 帧中只有 1 帧贡献了绝大多数 flux，则更像宇宙线。
 
 时间维 active 阈值为：
 
@@ -466,6 +535,31 @@ Residual 候选检测之后的检查可以显式关闭，用于评估星上算�
 
 这些开关的设计目的不是改变 residual-first 检测本身，而是把 residual 之后的确认性检查变成可裁剪模块。若星上下传带宽足够、但算力或缓存更紧张，可以先关闭这些检查，只下传 residual 候选。
 
+## 12.2 跨 12 帧块状态缓存
+
+低缓存版本只保存上一个检测块的候选元数据，不保存图像或 cutout。每条状态包含：
+
+```text
+x, y, frame_start, frame_end, track_length
+```
+
+当前块候选会用 KD-tree 在上一块候选中查找邻近位置。默认半径：
+
+```text
+previous_match_radius_px = 2.0
+```
+
+输出字段：
+
+- `previous_block_match_flag`
+- `previous_block_match_dist_px`
+- `previous_block_match_frame_start`
+- `previous_block_match_frame_end`
+- `track_length`
+- `candidate_priority`
+
+这个跨块匹配只作为加分和事件关联，不作为硬通过条件。上一块无匹配的候选仍然可以保留为新候选，避免漏掉刚开始爆发的 GRB。若当前块和上一块同位置连续出现，则候选优先级提升为 `confirmed_previous_block`。
+
 ## 13. Truth Matching 验证逻辑
 
 Truth matching 只用于注入实验验证，不属于星上检测流程。
@@ -531,12 +625,16 @@ template_sources.csv
 - `window_frame_count`
 - `x`
 - `y`
+- `bin_x`
+- `bin_y`
 
 Residual-first 字段：
 
 - `residual_peak_value`
 - `residual_flux`
 - `residual_npix`
+- `flux_peak_ratio`
+- `residual_prefilter_pass`
 
 局部测量字段：
 
@@ -557,6 +655,15 @@ Residual-first 字段：
 - `likely_cosmic_ray`
 - `temporal_flux_series`
 
+跨块状态字段：
+
+- `previous_block_match_flag`
+- `previous_block_match_dist_px`
+- `previous_block_match_frame_start`
+- `previous_block_match_frame_end`
+- `track_length`
+- `candidate_priority`
+
 验证字段：
 
 - `truth_match_flag`
@@ -572,7 +679,9 @@ Residual-first 字段：
 - `window_frame_count`
 - `template_source_count`
 - `initial_sources`
+- `after_residual_prefilter`
 - `template_matched_sources_kept`
+- `previous_block_matches`
 - `after_measurement`
 - `final_candidates`
 
@@ -587,7 +696,7 @@ Residual-first 字段：
 
 ```text
 PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_paired_no_template_catalog \
@@ -611,7 +720,7 @@ output_size = about 36 KB
 
 ```text
 PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_no_post_checks \
@@ -687,6 +796,10 @@ Residual-first 假设静态星源可以被模板干净减掉。如果指向、PS
 | `residual_threshold_sigma` | 3.0 | residual 像素进入连通域前需要超过背景的 sigma 数。 |
 | `residual_min_npix` | 2 | residual 连通域最小像素数。 |
 | `residual_max_npix` | 400 | residual 连通域最大像素数。 |
+| `min_residual_peak_value` | 10000 | residual 连通域初筛的最小峰值。 |
+| `min_residual_flux` | 0 | residual 连通域初筛的最小总通量。 |
+| `min_flux_peak_ratio` | 3.0 | residual 连通域总通量与峰值的最小比值，用于排除过尖候选。 |
+| `max_final_candidates_per_window` | 5000 | 每个 12 帧检测窗口最多输出的 final 候选数，`<=0` 表示不限制。 |
 | `match_radius_px` | 0.75 | 启用模板星源匹配时的最近邻匹配半径。 |
 | `cut_half` | 9 | 局部 residual 测量 cutout 半宽。 |
 | `annulus_r_in` | 6.0 | 局部背景环内半径。 |

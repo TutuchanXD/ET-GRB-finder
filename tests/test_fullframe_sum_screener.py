@@ -9,12 +9,31 @@ import numpy as np
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1]
+    / "scripts"
     / "GRB_from_fullframe_uint16_sum_template_match_noplot.py"
+)
+BIN2_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "GRB_from_fullframe_uint16_sum_template_match_noplot_bin2.py"
+)
+BIN3_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "GRB_from_fullframe_uint16_sum_template_match_noplot_bin3.py"
 )
 
 
 def load_module():
     spec = importlib.util.spec_from_file_location("fullframe_screener", SCRIPT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_module_from(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -297,3 +316,168 @@ def test_post_residual_checks_can_be_disabled_from_cli(tmp_path):
     assert int(row["local_excess_flux"]) == int(row["residual_flux"])
     assert int(row["peak_npix"]) == int(row["residual_npix"])
     assert row["temporal_flux_series"] == "[]"
+
+
+def test_onboard_first_window_is_template_only_without_external_template(tmp_path):
+    mod = load_module()
+    run = tmp_path / "run"
+    frames = run / "frames"
+    frames.mkdir(parents=True)
+    for index in range(4):
+        arr = np.full((12, 12), 100, dtype=np.uint16)
+        if index >= 2:
+            arr[5, 5] += 80
+            arr[5, 6] += 60
+        np.save(frames / f"frame_{index:06d}.npy", arr)
+    out = tmp_path / "out"
+
+    rc = mod.main(
+        [
+            "--input-run",
+            str(run),
+            "--output-dir",
+            str(out),
+            "--window-size",
+            "2",
+            "--stride",
+            "2",
+            "--no-local-shape-check",
+            "--no-temporal-check",
+            "--keep-all-residual-candidates",
+        ]
+    )
+
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["template_window"] == [0, 1]
+    assert manifest["detection_windows_processed"] == 1
+    assert manifest["windows_processed"] == 1
+
+    summary_rows = list(csv.DictReader((out / "streaming_sum_summary.csv").open()))
+    assert [(row["frame_start"], row["frame_end"]) for row in summary_rows] == [("2", "3")]
+
+
+def test_temporal_support_uses_first_template_window_as_low_cache_baseline(tmp_path):
+    mod = load_module()
+    run = tmp_path / "run"
+    frames = run / "frames"
+    frames.mkdir(parents=True)
+    for index in range(6):
+        arr = np.zeros((15, 15), dtype=np.uint16)
+        arr[7, 7] = 1000
+        if index == 2:
+            arr[7, 7] += 500
+            arr[7, 8] += 300
+            arr[8, 7] += 200
+        np.save(frames / f"frame_{index:06d}.npy", arr)
+    paths = mod.frame_paths_from_run(run)
+    cfg = mod.ScreenerConfig(
+        window_size=2,
+        temporal_cut_half=2,
+        temporal_aperture_radius=1.5,
+        temporal_annulus_r_in=2.0,
+        temporal_annulus_r_out=2.8,
+        temporal_sigma=3.0,
+    )
+
+    temporal = mod.measure_temporal_support(
+        paths,
+        paths,
+        0,
+        2,
+        2,
+        6,
+        7,
+        7,
+        cfg,
+    )
+
+    assert json.loads(temporal["temporal_flux_series"]) == [1000, 0, 0, 0]
+    assert temporal["temporal_active_frames"] == 1
+    assert temporal["likely_cosmic_ray"] == 1
+
+
+def test_previous_block_state_marks_match_without_being_a_hard_requirement():
+    mod = load_module()
+    previous = [
+        {
+            "x": 10.0,
+            "y": 20.0,
+            "frame_start": 12,
+            "frame_end": 23,
+            "track_length": 2,
+        }
+    ]
+    current = [
+        {"x": 11.0, "y": 21.0, "frame_start": 24, "frame_end": 35},
+        {"x": 90.0, "y": 90.0, "frame_start": 24, "frame_end": 35},
+    ]
+
+    annotated = mod.annotate_previous_block_matches(current, previous, radius_px=2.0)
+
+    assert annotated[0]["previous_block_match_flag"] == 1
+    assert annotated[0]["track_length"] == 3
+    assert annotated[1]["previous_block_match_flag"] == 0
+    assert annotated[1]["track_length"] == 1
+
+
+def test_temporal_peak_maps_flag_single_frame_positive_residual():
+    mod = load_module()
+    cfg = mod.ScreenerConfig(cosmic_single_frame_fraction=0.8, cosmic_max_active_frames=1)
+    active = np.zeros((5, 5), dtype=np.uint8)
+    total = np.zeros((5, 5), dtype=np.int64)
+    peak = np.zeros((5, 5), dtype=np.int64)
+    active[2, 3] = 1
+    total[2, 3] = 1000
+    peak[2, 3] = 1000
+
+    temporal = mod.measure_temporal_support_from_peak_maps(active, total, peak, 3, 2, cfg)
+
+    assert temporal["temporal_active_frames"] == 1
+    assert temporal["temporal_max_single_frame_fraction"] == 1.0
+    assert temporal["likely_cosmic_ray"] == 1
+    assert temporal["temporal_flux_series"] == "[]"
+
+
+def test_residual_prefilter_rejects_weak_or_too_spiky_candidates():
+    mod = load_module()
+    cfg = mod.ScreenerConfig(min_residual_peak_value=10000, min_flux_peak_ratio=3.0)
+
+    weak = {"residual_peak_value": 9000, "residual_flux": 90000}
+    spiky = {"residual_peak_value": 20000, "residual_flux": 40000}
+    psf_like = {"residual_peak_value": 20000, "residual_flux": 80000}
+
+    assert mod.passes_residual_prefilter(weak, cfg) is False
+    assert mod.passes_residual_prefilter(spiky, cfg) is False
+    assert mod.passes_residual_prefilter(psf_like, cfg) is True
+
+
+def test_window_budget_keeps_highest_flux_final_candidates():
+    mod = load_module()
+    cfg = mod.ScreenerConfig(max_final_candidates_per_window=2)
+    rows = [
+        {"pass_single_stack": 1, "residual_flux": 10},
+        {"pass_single_stack": 1, "residual_flux": 30},
+        {"pass_single_stack": 0, "residual_flux": 100},
+        {"pass_single_stack": 1, "residual_flux": 20},
+    ]
+
+    selected = mod.select_final_rows_for_window(rows, cfg)
+
+    assert [row["residual_flux"] for row in selected] == [30, 20]
+
+
+def test_binned_scripts_define_independent_block_binning_coordinate_mapping():
+    for path, name, bin_size in [
+        (BIN2_SCRIPT_PATH, "binned2_screener", 2),
+        (BIN3_SCRIPT_PATH, "binned3_screener", 3),
+    ]:
+        mod = load_module_from(path, name)
+        assert mod.SPATIAL_BIN_SIZE == bin_size
+        assert mod.binned_detection_shape((9120, 8900)) == (
+            9120 // bin_size,
+            8900 // bin_size,
+        )
+        x, y = mod.detector_center_from_bin(4, 5)
+        assert x == 4 * bin_size + (bin_size - 1) / 2.0
+        assert y == 5 * bin_size + (bin_size - 1) / 2.0

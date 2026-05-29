@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local/editor state
+.DS_Store
+.vscode/
+
+# Runtime outputs should live under /home/cxgao/Results/GRB.
+Results/
+results/
+outputs/
+run_outputs/

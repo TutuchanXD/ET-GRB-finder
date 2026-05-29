@@ -5,13 +5,13 @@ This directory tracks known algorithm issues and decisions for the onboard-style
 The current adapted script is:
 
 ```text
-/home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py
+/home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py
 ```
 
 The original 501x501 prototype is left untouched:
 
 ```text
-/home/cxgao/ET/GRB/GRB_find/GRB_from_integer20_npy_template_match_sum_noplot.py
+/home/cxgao/ET/GRB/ET-GRB-finder/wenxiong-version/GRB_from_integer20_npy_template_match_sum_noplot.py
 ```
 
 ## Current Purpose
@@ -109,7 +109,7 @@ Residual paired-template smoke command processed all 10 full-frame windows:
 
 ```text
 PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
-  /home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
+  /home/cxgao/ET/GRB/ET-GRB-finder/scripts/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
   --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_paired_no_template_catalog \
