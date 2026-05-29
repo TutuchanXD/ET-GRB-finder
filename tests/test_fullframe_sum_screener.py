@@ -1,5 +1,6 @@
 import csv
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -88,6 +89,58 @@ def test_detect_sources_collapses_connected_saturated_plateau():
     assert 13 <= rows[0]["y"] <= 14
 
 
+def test_residual_detection_ignores_static_stars_and_keeps_brightening():
+    mod = load_module()
+    cfg = mod.ScreenerConfig(max_filter_size=3, residual_threshold_sigma=3.0)
+    template = np.full((15, 15), 1000, dtype=np.uint32)
+    summed = template.copy()
+
+    template[3, 3] = 5000
+    summed[3, 3] = 5000
+    template[10, 10] = 6000
+    summed[10, 10] = 6000
+    summed[7, 7] += 100
+    summed[7, 8] += 50
+    summed[8, 7] += 40
+
+    rows, threshold, bkg_median, bkg_sigma = mod.detect_residual_sources_on_tile(
+        summed,
+        template,
+        row_origin=0,
+        col_origin=0,
+        core_bounds=(0, 15, 0, 15),
+        cfg=cfg,
+    )
+
+    assert bkg_median == 0
+    assert bkg_sigma == 0
+    assert threshold == 0
+    assert len(rows) == 1
+    assert rows[0]["x"] == 7
+    assert rows[0]["y"] == 7
+    assert rows[0]["residual_npix"] == 3
+    assert rows[0]["residual_flux"] == 190
+
+
+def test_residual_detection_rejects_single_pixel_cosmic_shape_by_default():
+    mod = load_module()
+    cfg = mod.ScreenerConfig(max_filter_size=3)
+    template = np.zeros((11, 11), dtype=np.uint32)
+    summed = template.copy()
+    summed[5, 5] = 1000
+
+    rows, _threshold, _bkg_median, _bkg_sigma = mod.detect_residual_sources_on_tile(
+        summed,
+        template,
+        row_origin=0,
+        col_origin=0,
+        core_bounds=(0, 11, 0, 11),
+        cfg=cfg,
+    )
+
+    assert rows == []
+
+
 def test_candidate_local_xy_uses_column_origin_for_x():
     mod = load_module()
 
@@ -157,3 +210,29 @@ def test_truth_matching_is_optional_and_uses_events_csv(tmp_path):
 
     assert matched[0]["truth_event_id"] == "7"
     assert matched[0]["truth_match_flag"] == 1
+
+
+def test_main_does_not_write_template_source_catalog_by_default(tmp_path):
+    mod = load_module()
+    run = make_run(tmp_path, n_frames=2)
+    out = tmp_path / "out"
+
+    rc = mod.main(
+        [
+            "--input-run",
+            str(run),
+            "--output-dir",
+            str(out),
+            "--window-size",
+            "2",
+            "--stride",
+            "2",
+            "--max-windows",
+            "1",
+        ]
+    )
+
+    assert rc == 0
+    assert not (out / "template_sources.csv").exists()
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["template_match_sources"] is False

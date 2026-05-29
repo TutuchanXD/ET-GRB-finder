@@ -22,12 +22,14 @@ The onboard algorithm should find suspicious locations and time windows, not pro
 
 - Keep the 12-frame sum strategy because onboard memory is limited.
 - Process the full frame in tiles with halo instead of materializing a full-frame difference cube.
-- Do not drop candidates simply because they match a template source. Matched sources are kept as `template_source_brightening`.
+- Detect candidates on the 12-frame residual sum, `current_sum - template_sum`, before any candidate measurement.
+- Do not drop candidates simply because they match a template source. If template-source matching is explicitly enabled, matched sources are kept as `template_source_brightening`.
 - Lower hard morphology threshold from the old `peak_npix >= 10` to default `peak_npix >= 4`.
 - Lower local excess threshold from old `5 sigma` to default `3 sigma`.
 - Lower template match radius from old `1.5 px` to default `0.75 px`.
 - Remove hard-coded target coordinates. Optional truth matching is driven by `events.csv` only during ground validation.
 - Add an advisory cosmic-ray flag based on small-cutout temporal persistence. It is not a hard rejection by default.
+- Do not write the static template-source catalog by default. Use `--template-match-sources` only for ground diagnostics.
 
 ## Known Issues To Track
 
@@ -83,9 +85,10 @@ The onboard algorithm should find suspicious locations and time windows, not pro
    - Current behavior: if the residual sigma is zero, use a zero-or-median floor threshold and keep positive connected residuals.
 
 10. **Candidate flood from full-frame source finding**
-   - A single 12-frame full-frame sum still produces about 620k measured source candidates on the current data.
-   - Saturated local-max plateaus are now collapsed to one candidate per connected local-max island, but most candidates are real stars/local peaks rather than duplicated plateau pixels.
-   - This is the main remaining onboard blocker: a flight version should not write or sort every measured source. It needs an explicit candidate budget, a top-N/local-excess heap per tile, or a stronger pre-filter before downlink queue generation.
+   - Previous raw-sum detection produced about 620k measured source candidates for one 12-frame full-frame window.
+   - Current behavior: detect on `current_sum - template_sum`; on the same local paired-template smoke this reduced measured candidates from 620,217 to 6.
+   - Remaining risk: if a flight template is contaminated, stale, or not aligned photometrically, residuals around static sources can reappear.
+   - If future data still has candidate floods, add an explicit per-tile top-N residual-score budget.
 
 ## Local Smoke Test, 2026-05-29
 
@@ -102,19 +105,29 @@ Local copy checks:
 - template frames: 120
 - checked first and last frames in both runs: `(9120, 8900)`, `uint16`
 
-Paired-template smoke command processed one 12-frame full-frame window, frames 0-11:
+Residual paired-template smoke command processed all 10 full-frame windows:
 
 ```text
 PYTHONPATH=/home/cxgao/ET/GRB conda run -n etbase python \
   /home/cxgao/ET/GRB/GRB_find/GRB_from_fullframe_uint16_sum_template_match_noplot.py \
   --input-run /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529 \
   --template-run /home/cxgao/Results/GRB/full_sim/main_rd_full_8900x9120_g17_sky22_subpix1_jipsf100_120x10s \
-  --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_sum12_streaming_smoke_paired_w1 \
+  --output-dir /home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_residual_full_paired_no_template_catalog \
   --truth-events-csv /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529/events.csv \
-  --max-windows 1 --tile-size 2048 --overwrite
+  --tile-size 2048 --overwrite
 ```
 
 Result:
+
+- windows processed: 10
+- measured candidates: 43
+- final candidates: 43
+- truth-matched final candidates: 43
+- unique truth event ids matched: 20 / 20
+- template source catalog written: no
+- output size: about 36 KB
+
+Historical raw-sum one-window smoke, before residual-first candidate detection:
 
 - measured candidates: 620,217
 - final candidates: 8

@@ -39,6 +39,9 @@ class ScreenerConfig:
     input_bit_depth: int = 16
     max_filter_size: int = 7
     source_threshold_sigma: float = 4.0
+    residual_threshold_sigma: float = 3.0
+    residual_min_npix: int = 2
+    residual_max_npix: int = 400
     match_radius_px: float = 0.75
     cut_half: int = 9
     annulus_r_in: float = 6.0
@@ -230,6 +233,79 @@ def detect_sources_on_tile(
             }
         )
     rows.sort(key=lambda row: row["source_peak_value"], reverse=True)
+    return rows, threshold, bkg_median, bkg_sigma
+
+
+def detect_residual_sources_on_tile(
+    sum_tile: np.ndarray,
+    template_sum_tile: np.ndarray,
+    *,
+    row_origin: int,
+    col_origin: int,
+    core_bounds: tuple[int, int, int, int],
+    cfg: ScreenerConfig,
+) -> tuple[list[dict], int, int, int]:
+    diff = sum_tile.astype(LOCAL_DIFF_DTYPE, copy=False) - template_sum_tile.astype(
+        LOCAL_DIFF_DTYPE,
+        copy=False,
+    )
+    bkg_median, bkg_sigma = robust_integer_sigma(diff)
+    if bkg_sigma <= 0:
+        threshold = max(int(bkg_median), 0)
+    else:
+        threshold = int(bkg_median + cfg.residual_threshold_sigma * bkg_sigma)
+
+    mask = (diff > threshold) & (diff > 0)
+    labels, nlabels = label(mask, structure=np.ones((3, 3), dtype=int))
+    objects = find_objects(labels, max_label=nlabels)
+    row0, row1, col0, col1 = core_bounds
+    rows = []
+    for lab, lab_slice in enumerate(objects, start=1):
+        if lab_slice is None:
+            continue
+        y_slice, x_slice = lab_slice
+        local_labels = labels[lab_slice]
+        local_mask = local_labels == lab
+        if not np.any(local_mask):
+            continue
+        vals = diff[lab_slice][local_mask]
+        npix = int(vals.size)
+        if npix < cfg.residual_min_npix or npix > cfg.residual_max_npix:
+            continue
+
+        local_ys, local_xs = np.where(local_mask)
+        ys = local_ys + int(y_slice.start)
+        xs = local_xs + int(x_slice.start)
+        peak_value = int(vals.max())
+        max_idx = np.flatnonzero(vals == peak_value)
+        if max_idx.size > 1:
+            y_center = float(np.mean(ys[max_idx]))
+            x_center = float(np.mean(xs[max_idx]))
+            best_idx = max_idx[
+                int(np.argmin((ys[max_idx] - y_center) ** 2 + (xs[max_idx] - x_center) ** 2))
+            ]
+        else:
+            best_idx = int(max_idx[0])
+
+        y_local = int(ys[best_idx])
+        x_local = int(xs[best_idx])
+        y = int(row_origin + y_local)
+        x = int(col_origin + x_local)
+        if not (row0 <= y < row1 and col0 <= x < col1):
+            continue
+        rows.append(
+            {
+                "x": x,
+                "y": y,
+                "source_peak_value": int(sum_tile[y_local, x_local]),
+                "residual_peak_value": peak_value,
+                "residual_flux": int(
+                    max(int(vals.sum(dtype=LOCAL_DIFF_DTYPE)) - int(bkg_median) * npix, 0)
+                ),
+                "residual_npix": npix,
+            }
+        )
+    rows.sort(key=lambda row: row["residual_flux"], reverse=True)
     return rows, threshold, bkg_median, bkg_sigma
 
 
@@ -557,8 +633,9 @@ def scan_window(
                 col_slice,
             )
 
-        sources, source_threshold, source_bkg_median, source_bkg_sigma = detect_sources_on_tile(
+        sources, source_threshold, source_bkg_median, source_bkg_sigma = detect_residual_sources_on_tile(
             sum_img,
+            template_sum_img,
             row_origin=row_slice.start,
             col_origin=col_slice.start,
             core_bounds=(row0, row1, col0, col1),
@@ -613,6 +690,9 @@ def scan_window(
                     "source_threshold": int(source_threshold),
                     "source_bkg_median": int(source_bkg_median),
                     "source_bkg_sigma": int(source_bkg_sigma),
+                    "residual_peak_value": int(row.get("residual_peak_value", 0)),
+                    "residual_flux": int(row.get("residual_flux", 0)),
+                    "residual_npix": int(row.get("residual_npix", 0)),
                     "local_excess_flux": int(local_flux),
                     "peak_npix": int(npix),
                     "peak_excess_value": int(peak_excess),
@@ -655,9 +735,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--halo", type=int, default=12)
     parser.add_argument("--max-windows", type=int, default=None)
     parser.add_argument("--source-threshold-sigma", type=float, default=4.0)
+    parser.add_argument("--residual-threshold-sigma", type=float, default=3.0)
+    parser.add_argument("--residual-min-npix", type=int, default=2)
+    parser.add_argument("--residual-max-npix", type=int, default=400)
     parser.add_argument("--local-threshold-sigma", type=float, default=3.0)
     parser.add_argument("--match-radius-px", type=float, default=0.75)
     parser.add_argument("--effective-npix-threshold", type=int, default=4)
+    parser.add_argument(
+        "--template-match-sources",
+        action="store_true",
+        help="Build and write the static template-source catalog for nearest-source annotation.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
 
@@ -669,6 +757,9 @@ def config_from_args(args: argparse.Namespace) -> ScreenerConfig:
         tile_size=args.tile_size,
         halo=args.halo,
         source_threshold_sigma=args.source_threshold_sigma,
+        residual_threshold_sigma=args.residual_threshold_sigma,
+        residual_min_npix=args.residual_min_npix,
+        residual_max_npix=args.residual_max_npix,
         local_threshold_sigma=args.local_threshold_sigma,
         match_radius_px=args.match_radius_px,
         effective_npix_threshold=args.effective_npix_threshold,
@@ -695,15 +786,9 @@ def main(argv: list[str] | None = None) -> int:
         ranges = ranges[: int(args.max_windows)]
 
     paired_template = args.template_run is not None
-    if paired_template:
-        template_xy, template_sources = build_template_sources(
-            template_frame_paths,
-            ranges[0][0],
-            ranges[0][1],
-            shape,
-            cfg,
-        )
-    else:
+    template_xy = np.empty((0, 2), dtype=float)
+    template_sources: list[dict] = []
+    if args.template_match_sources and not paired_template:
         template_xy, template_sources = build_template_sources(
             template_frame_paths,
             0,
@@ -715,8 +800,8 @@ def main(argv: list[str] | None = None) -> int:
     all_rows: list[dict] = []
     summary_rows: list[dict] = []
     for frame_start, frame_end in ranges:
-        if paired_template:
-            template_xy, _template_sources_for_window = build_template_sources(
+        if args.template_match_sources and paired_template:
+            template_xy, template_sources = build_template_sources(
                 template_frame_paths,
                 frame_start,
                 frame_end,
@@ -758,6 +843,9 @@ def main(argv: list[str] | None = None) -> int:
         "source_threshold",
         "source_bkg_median",
         "source_bkg_sigma",
+        "residual_peak_value",
+        "residual_flux",
+        "residual_npix",
         "local_excess_flux",
         "peak_npix",
         "peak_excess_value",
@@ -788,18 +876,20 @@ def main(argv: list[str] | None = None) -> int:
     save_csv(args.output_dir / "streaming_sum_candidates_after_measurement.csv", all_rows, measured_fields)
     save_csv(args.output_dir / "streaming_sum_transient_candidates.csv", final_rows, measured_fields)
     save_csv(args.output_dir / "streaming_sum_summary.csv", summary_rows, summary_fields)
-    save_csv(
-        args.output_dir / "template_sources.csv",
-        template_sources,
-        [
-            "x",
-            "y",
-            "source_peak_value",
-            "template_source_threshold",
-            "template_bkg_median",
-            "template_bkg_sigma",
-        ],
-    )
+    template_source_catalog_written = bool(args.template_match_sources)
+    if template_source_catalog_written:
+        save_csv(
+            args.output_dir / "template_sources.csv",
+            template_sources,
+            [
+                "x",
+                "y",
+                "source_peak_value",
+                "template_source_threshold",
+                "template_bkg_median",
+                "template_bkg_sigma",
+            ],
+        )
     manifest = {
         "input_run": str(args.input_run),
         "template_run": str(args.template_run) if args.template_run else None,
@@ -812,9 +902,14 @@ def main(argv: list[str] | None = None) -> int:
         "tile_size": cfg.tile_size,
         "halo": cfg.halo,
         "source_threshold_sigma": cfg.source_threshold_sigma,
+        "residual_threshold_sigma": cfg.residual_threshold_sigma,
+        "residual_min_npix": cfg.residual_min_npix,
+        "residual_max_npix": cfg.residual_max_npix,
         "local_threshold_sigma": cfg.local_threshold_sigma,
         "match_radius_px": cfg.match_radius_px,
         "effective_npix_threshold": cfg.effective_npix_threshold,
+        "template_match_sources": bool(args.template_match_sources),
+        "template_source_catalog_written": template_source_catalog_written,
         "windows_processed": len(ranges),
         "candidates_after_measurement": len(all_rows),
         "final_candidates": len(final_rows),
