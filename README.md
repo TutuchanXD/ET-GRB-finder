@@ -1,22 +1,69 @@
-# ET-GRB-finder
+# ET-GRB-finder 当前交付算法说明
 
-`ET-GRB-finder` 是一个面向星上低缓存场景的 GRB 候选搜索流水线。实现位于 `grbfinder/`，`scripts/` 下只保留短入口脚本，并在每个脚本顶部列出完整可编辑的默认参数表 `SCRIPT_DEFAULTS`。
+本文面向载荷实现方，说明当前 `scripts/grbfind.py`、`scripts/grbfind-bin2.py` 与 `scripts/grbfind-bin3.py` 的实际计算链路。说明只覆盖当前交付配置下会参与候选生成的步骤。
 
- `1x1` 入口在：
+当前算法目标是对连续全帧图像做 12 帧求和差分搜索，在完整检测网格上直接完成 residual 背景估计、阈值分割、连通域识别和候选筛选，输出可下传或进一步处理的 GRB 候选位置和时间窗口。
+
+## 流程图
+
+![GRB finder 当前流水线](docs/assets/grbfind_pipeline.png)
+
+流程图源文件位于：
+
+```text
+docs/assets/grbfind_pipeline.drawio
+```
+
+## 当前入口
+
+### 1x1 链路
 
 ```bash
 conda run -n etbase python scripts/grbfind.py
 ```
 
-## 默认流水线流程
+### 2x2 空间 bin 链路
 
-流程以 `scripts/grbfind.py` 的默认配置为准。默认输入是实际注入 GRB 的全帧仿真结果：
-
-```text
-input_run = /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529
+```bash
+conda run -n etbase python scripts/grbfind-bin2.py
 ```
 
-输入目录需要包含：
+### 3x3 空间 bin 链路
+
+```bash
+conda run -n etbase python scripts/grbfind-bin3.py
+```
+
+三个入口共享同一套 `grbfinder/` 实现，区别只在脚本顶部的 `SCRIPT_DEFAULTS` 参数。
+
+## 当前关键配置
+
+| 配置项                              |       `grbfind.py` | `grbfind-bin2.py` | `grbfind-bin3.py` | 作用                             |
+| ----------------------------------- | ------------------: | ----------------: | ----------------: | -------------------------------- |
+| `spatial_bin`                     |              `1x1` |             `2x2` |             `3x3` | 检测网格空间 bin                 |
+| `window_size`                     |               `12` |              `12` |              `12` | 每个检测窗口求和帧数             |
+| `stride`                          |               `12` |              `12` |              `12` | 相邻窗口起点间隔                 |
+| `max_windows`                     |             `None` |            `None` |            `None` | 不截断，使用输入 run 的全部窗口  |
+| `template_strategy`               | `rolling-previous` | `rolling-previous` | `rolling-previous` | 当前窗口减最近完整前序窗口       |
+| `use_tiles`                       |            `False` |           `False` |           `False` | 每个时间窗口一次处理完整检测网格 |
+| `input_bit_depth`                 |               `16` |              `16` |              `16` | 输入整数帧范围检查               |
+| `residual_threshold_sigma`        |              `3.0` |             `3.0` |             `3.0` | residual 像素阈值的 sigma 系数   |
+| `residual_min_npix`               |               `50` |              `12` |               `6` | residual 连通域最小像素数        |
+| `residual_max_npix`               |              `400` |             `400` |             `400` | residual 连通域最大像素数        |
+| `min_residual_peak_value`         |            `50000` |          `250000` |          `250000` | residual 连通域最小峰值          |
+| `min_residual_flux`               |                `0` |               `0` |         `1000000` | residual 连通域最小总通量        |
+| `min_flux_peak_ratio`             |              `3.0` |             `2.0` |             `1.5` | 总通量与峰值的最小比值           |
+| `previous_block_match_check`      |            `False` |          `False` |          `False` | 是否启用跨窗口候选关联           |
+| `previous_match_radius_px`        |              `2.0` |             `2.0` |             `2.0` | 与上一检测窗口候选关联的半径     |
+| `max_final_candidates_per_window` |             `5000` |            `5000` |            `5000` | 每个检测窗口最多输出候选数       |
+
+默认输入 run：
+
+```text
+/home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed20260529
+```
+
+输入帧路径格式：
 
 ```text
 <input_run>/frames/frame_000000.npy
@@ -24,153 +71,555 @@ input_run = /home/cxgao/Results/GRB/grb_injected/main_rd_g17_120x10s_grb_seed202
 ...
 ```
 
-当前实际数据为 120 帧，全帧尺寸 `(9120, 8900)`，单帧 dtype 为 `uint16`。
-
-### 1. 读取脚本默认参数
-
-`scripts/grbfind.py` 顶部的 `SCRIPT_DEFAULTS` 是本次运行的默认配置来源。最重要的默认值是：
+当前实际输入为：
 
 ```text
-spatial_bin       = 1x1
-window_size       = 12
-stride            = 12
-max_windows       = 2
+n_frames = 120
+frame_shape = (9120, 8900)  # row, col
+frame_dtype = uint16
+```
+
+## 坐标约定
+
+代码内部使用 NumPy 图像坐标：
+
+```text
+row = y
+col = x
+```
+
+输出候选使用探测器像素坐标：
+
+```text
+x = column coordinate
+y = row coordinate
+```
+
+`grbfind.py` 的检测网格就是原始像素网格，因此：
+
+```text
+detector_x = bin_x
+detector_y = bin_y
+```
+
+`grbfind-bin3.py` 的检测网格是 3x3 block 网格。若 residual 候选位于 bin 坐标 `(bin_x, bin_y)`，返回到原始 1x1 探测器坐标时取 3x3 block 中心：
+
+```text
+detector_x = 3 * bin_x + 1
+detector_y = 3 * bin_y + 1
+```
+
+因此 3x3 链路输出坐标仍然落在原始探测器像素坐标系中，只是代表 3x3 block 的中心。
+
+## 算法流水线顺序
+
+当前默认入口 `scripts/grbfind.py`、`scripts/grbfind-bin2.py`、`scripts/grbfind-bin3.py` 的实际顺序是：
+
+```text
+原始单帧 F_i
+  -> 单帧检测网格 B_i
+     1x1: B_i = F_i
+     2x2/3x3: B_i = 原始像素 block sum
+  -> 当前窗口 12 帧和 C = sum(B_i in current window)
+  -> 模板窗口 12 帧和 T = sum(B_i in template window)
+  -> residual 差分 R = C - T
+  -> residual 背景估计、阈值分割、连通域识别
+  -> residual 连通域统计和初筛
+  -> 坐标返回、可选跨窗口关联、final 输出
+```
+
+因此，对空间 bin 链路，代码实现上是**先把每一帧映射到检测网格，再对检测网格做 12 帧求和，最后做模板差分**。由于空间 block sum 和时间求和都是加法，数值上等价于“先做 12 帧原始求和，再做空间 bin”，但实现不是先保存一张原始全幅 12 帧和图再 bin。
+
+## 1. 读取帧列表和基础检查
+
+入口脚本调用 `grbfinder.cli.main()`，随后进入 `run_pipeline()`。流水线从输入 run 中读取：
+
+```text
+frames_dir = input_run / "frames"
+frame_paths = sorted(frames_dir.glob("frame_*.npy"))
+```
+
+要求至少存在一个 `frame_*.npy`。第一帧必须是二维数组。当前输入为：
+
+```text
+shape = (9120, 8900)
+dtype = uint16
+```
+
+位深检查只检查首帧和末帧的数值范围。对 `input_bit_depth = 16`，允许范围为：
+
+```text
+0 <= pixel_value <= 2^16 - 1 = 65535
+```
+
+## 2. 构造检测网格和空间 bin
+
+检测网格尺寸由原始帧尺寸和空间 bin 决定：
+
+```text
+detection_rows = frame_rows // spatial_bin_rows
+detection_cols = frame_cols // spatial_bin_cols
+```
+
+### 1x1 检测网格
+
+`grbfind.py` 中：
+
+```text
+spatial_bin = 1x1
+detection_shape = (9120, 8900)
+cropped_input_shape = (9120, 8900)
+```
+
+不做空间合并，检测网格与原始帧一致。每一帧的检测网格图像直接来自原始帧：
+
+```text
+B_i[y, x] = F_i[y, x]
+```
+
+### 2x2 和 3x3 检测网格
+
+`grbfind-bin2.py` 和 `grbfind-bin3.py` 中，每个检测网格像素是原始图像一个 block 的像素和。以 3x3 为例：
+
+```text
+B_i[y, x] = sum(F_i[3y + a, 3x + b] for a in 0..2 for b in 0..2)
+```
+
+等价展开为：
+
+```text
+B_i[y, x] =
+    F_i[3y + 0, 3x + 0] + F_i[3y + 0, 3x + 1] + F_i[3y + 0, 3x + 2]
+  + F_i[3y + 1, 3x + 0] + F_i[3y + 1, 3x + 1] + F_i[3y + 1, 3x + 2]
+  + F_i[3y + 2, 3x + 0] + F_i[3y + 2, 3x + 1] + F_i[3y + 2, 3x + 2]
+```
+
+代码实现上，先读取参与检测网格的原始区域，然后 reshape 为：
+
+```text
+(out_h, spatial_bin_rows, out_w, spatial_bin_cols)
+```
+
+再沿两个 block 维度求和：
+
+```text
+sum(axis=(1, 3), dtype=uint32)
+```
+
+`grbfind-bin3.py` 中：
+
+```text
+spatial_bin = 3x3
+detection_shape = (9120 // 3, 8900 // 3)
+                = (3040, 2966)
+cropped_input_shape = (3040 * 3, 2966 * 3)
+                    = (9120, 8898)
+```
+
+由于 `8900` 不能被 `3` 整除，最右侧 2 列原始像素不进入 3x3 检测网格。
+
+## 3. 构造时间窗口和 rolling 模板窗口
+
+窗口使用半开区间：
+
+```text
+W_j = [j * stride, min(j * stride + window_size, n_frames))
+```
+
+当前配置：
+
+```text
+window_size = 12
+stride = 12
+n_frames = 120
+```
+
+因此窗口为：
+
+```text
+W_0 = [0, 12)
+W_1 = [12, 24)
+W_2 = [24, 36)
+...
+W_9 = [108, 120)
+```
+
+CSV 输出使用闭区间显示，所以 `W_1 = [12, 24)` 会写成：
+
+```text
+frame_start = 12
+frame_end   = 23
+```
+
+当前模板策略为：
+
+```text
 template_strategy = rolling-previous
 ```
 
-因此默认只纳入两个原始时间窗口：
+第一个窗口 `W_0` 只作为种子模板，不做检测。后续每个检测窗口减去最近的完整前序窗口：
 
 ```text
-0-11   -> 种子模板窗口
-12-23  -> 唯一检测窗口
+detect W_1 - template W_0
+detect W_2 - template W_1
+detect W_3 - template W_2
+...
+detect W_9 - template W_8
 ```
 
-### 2. 构造时间窗口
-
-流水线用半开区间组织帧窗口：
+对 120 帧输入，当前链路实际处理：
 
 ```text
-[0, 12), [12, 24), [24, 36), ...
+all_windows_including_template = 10
+detection_windows_processed   = 9
 ```
 
-CSV 输出中使用闭区间端点显示，因此同一个窗口会写成：
+## 4. 分别计算当前窗口和模板窗口的 12 帧和
+
+当前交付配置 `use_tiles = False`，所以每个检测窗口一次处理完整检测网格。流水线不会在内存中保存完整 12 帧 cube，而是分别对当前窗口和模板窗口累加二维检测网格图像：
 
 ```text
-0-11, 12-23, 24-35, ...
+C = current_sum  = sum(B_i for i in current_window)
+T = template_sum = sum(B_i for i in template_window)
 ```
 
-### 3. 选择模板窗口
-
-默认 `template_strategy = rolling-previous`。在没有指定 `template_run` 时，每个检测窗口都减去最近的完整前序窗口：
+其中：
 
 ```text
-template 0-11   -> detect 12-23
-template 12-23  -> detect 24-35
-template 24-35  -> detect 36-47
+B_i = 第 i 帧检测网格图像
+C   = 当前窗口 12 帧和
+T   = 模板窗口 12 帧和
 ```
 
-如果显式设置 `template_strategy = first-window`，则所有后续检测窗口都减第一个窗口 `0-11`。如果指定 `template_run`，则进入 paired-template 验证模式，模板来自外部模板 run 的同帧号窗口。
-
-### 4. 按 tile 流式处理全帧
-
-全帧不会一次性构造成完整 12 帧 cube。流水线按 core tile 遍历检测网格，并在 tile 外侧加 `halo`，用于 cutout 和连通域边界安全处理。
-
-默认 `spatial_bin = 1x1`，检测网格就是原图网格。`grbfind-bin2.py` 和 `grbfind-bin3.py` 分别默认使用 `2x2` 和 `3x3` 非重叠空间 bin。
-
-### 5. 求当前窗口和模板窗口的 12 帧和
-
-对每个 tile，先分别计算：
+求和数组类型为：
 
 ```text
-current_sum  = sum(input frames in detection window)
-template_sum = sum(input/template frames in template window)
+SUM_DTYPE = uint32
 ```
 
-求和 dtype 使用 `uint32`，避免 12 帧 `uint16` 相加溢出。
-
-### 6. Residual-first 检测
-
-候选不是先从原始 12 帧和图中找星源，而是先做差分：
+当前配置下的最大理论和：
 
 ```text
-residual = current_sum - template_sum
+1x1: 12 * 65535 = 786420
+3x3: 12 * 9 * 65535 = 7077780
 ```
 
-然后在 residual 图上用局部背景和 sigma 阈值找正残差连通域。这样可以大幅减少静态星源造成的候选洪泛。
+均远小于 `uint32` 上限。
 
-初筛主要检查：
+## 5. 计算 residual 差分图
+
+候选不从原始 12 帧和图中直接寻找，而是计算当前窗口相对模板窗口的残差。
+
+差分前把两张求和图转为有符号整数：
 
 ```text
-residual_min_npix <= residual_npix <= residual_max_npix
+LOCAL_DIFF_DTYPE = int64
+```
+
+差分公式：
+
+```text
+R = int64(C) - int64(T)
+```
+
+其中：
+
+```text
+R = residual image
+C = current_sum
+T = template_sum
+```
+
+使用 `int64` 是因为模板相减后可能出现负残差。阈值和正残差 mask 在后续步骤中计算。
+
+## 6. 全帧 robust 背景和 residual 阈值
+
+对当前检测窗口的完整 residual 图 `R` 估计背景中位数和 robust sigma。
+
+背景中位数：
+
+```text
+m = median(R)
+```
+
+绝对偏差：
+
+```text
+D = |R - m|
+```
+
+MAD：
+
+```text
+MAD = median(D)
+```
+
+robust sigma 使用整数近似：
+
+```text
+sigma = (MAD * 14826 + 5000) // 10000
+```
+
+这对应：
+
+```text
+sigma ≈ 1.4826 * MAD
+```
+
+若：
+
+```text
+sigma > 0
+```
+
+则 residual 阈值为：
+
+```text
+threshold = int(m + residual_threshold_sigma * sigma)
+```
+
+当前：
+
+```text
+residual_threshold_sigma = 3.0
+```
+
+若：
+
+```text
+sigma <= 0
+```
+
+则阈值退化为：
+
+```text
+threshold = max(int(m), 0)
+```
+
+## 7. 正残差 mask
+
+只保留超过阈值的正残差像素：
+
+```text
+mask = (R > threshold) and (R > 0)
+```
+
+负残差和没有超过背景阈值的弱正残差不会进入后续连通域。
+
+## 8. 8 邻域连通域
+
+对 `mask` 做 8 邻域连通域标记：
+
+```text
+structure = ones((3, 3))
+labels, nlabels = label(mask, structure=structure)
+```
+
+每个连通域表示一个 residual 候选区域。对每个连通域先做面积筛选：
+
+```text
+residual_min_npix <= npix <= residual_max_npix
+```
+
+当前阈值：
+
+```text
+grbfind.py:
+  residual_min_npix = 50
+  residual_max_npix = 400
+
+grbfind-bin3.py:
+  residual_min_npix = 6
+  residual_max_npix = 400
+```
+
+`npix` 是检测网格上的连通域像素数。对 3x3 链路，一个检测网格像素对应原始图像的 9 个像素。
+
+## 9. 连通域统计量
+
+对通过面积筛选的连通域，取其 residual 像素集合：
+
+```text
+V = {R[y, x] | labels[y, x] == component_id}
+```
+
+像素数：
+
+```text
+residual_npix = len(V)
+```
+
+峰值：
+
+```text
+residual_peak_value = max(V)
+```
+
+总残差通量扣除 residual 背景：
+
+```text
+residual_flux = max(sum(V) - m * residual_npix, 0)
+```
+
+峰值比：
+
+```text
+flux_peak_ratio = residual_flux / max(residual_peak_value, 1)
+```
+
+候选中心初始取连通域内 residual 最大的像素。若有多个像素并列达到最大值，则：
+
+1. 计算这些峰值像素的平均位置。
+2. 选择距离该平均位置最近的峰值像素作为候选中心。
+
+候选还会记录当前窗口求和图在峰值位置的值：
+
+```text
+source_peak_value = C[y_peak, x_peak]
+```
+
+## 10. residual 初筛
+
+每个连通域候选必须通过以下条件：
+
+```text
 residual_peak_value >= min_residual_peak_value
 residual_flux >= min_residual_flux
-residual_flux / residual_peak_value >= min_flux_peak_ratio
+flux_peak_ratio >= min_flux_peak_ratio
 ```
 
-### 7. 局部 cutout 测量
-
-如果 `local_shape_check = True`，流水线会围绕候选位置截取局部 cutout，并重新计算局部背景、局部连通域面积和局部超额通量。
-
-输出字段包括：
+当前 1x1 阈值：
 
 ```text
-local_excess_flux
-peak_npix
-peak_excess_value
-peak_pixel_snr
+min_residual_peak_value = 50000
+min_residual_flux = 0
+min_flux_peak_ratio = 3.0
 ```
 
-这些字段默认用于诊断。`peak_npix` 不再单独作为 final 放行条件；它只在显式开启 `peak_pixel_snr_check` 时参与局部峰值显著性检查。
-
-### 8. 最终候选选择
-
-默认不启用 `keep_all_residual_candidates`，也不启用 `peak_pixel_snr_check`。因此通过 residual 连通域检测和 residual flux/peak 初筛的候选会直接进入 final 表。
-
-如果启用 `peak_pixel_snr_check = True`，final gate 会同时要求局部 footprint 和局部峰值显著性：
+当前 3x3 阈值：
 
 ```text
-peak_npix >= effective_npix_threshold
-and peak_pixel_snr >= peak_pixel_snr_threshold
+min_residual_peak_value = 250000
+min_residual_flux = 1000000
+min_flux_peak_ratio = 1.5
 ```
 
-`peak_pixel_snr` 是局部残差峰值除以局部 robust sigma 的显著性指标，不是物理 SNR。当前三份入口脚本默认关闭该 gate。
+这一步发生在完整 residual 图上，先于输出写表，是当前链路控制候选数量的主要步骤。
 
-如果 `temporal_check = True`，时间支持和宇宙线字段仍会写入结果，并用于候选优先级标注；它们不是当前 final 硬门槛。如果 `keep_all_residual_candidates = True`，则绕过 residual flux/peak 初筛和 final gate，把 residual 连通域候选写入 final 表。
+## 11. 候选坐标返回
 
-### 9. Truth match 仅用于地面验证
+通过 residual 初筛的候选会从检测网格坐标返回到原始探测器坐标。
 
-如果输入 run 下存在 `events.csv`，流水线会自动读取它并做 truth matching。相关字段只用于地面验证，不属于星上依赖：
+通用公式：
 
 ```text
-truth_match_flag
-truth_event_id
-truth_dist_px
+detector_x = bin_x * spatial_bin_cols + (spatial_bin_cols - 1) / 2
+detector_y = bin_y * spatial_bin_rows + (spatial_bin_rows - 1) / 2
 ```
 
-## 入口脚本
-
-当前只保留 3 个短入口：
+对 `grbfind.py`：
 
 ```text
-scripts/grbfind.py       -> 1x1, rolling-previous, max_windows=2
-scripts/grbfind-bin2.py  -> 2x2, rolling-previous, max_windows=2
-scripts/grbfind-bin3.py  -> 3x3, rolling-previous, max_windows=2
+spatial_bin_rows = 1
+spatial_bin_cols = 1
+
+detector_x = bin_x
+detector_y = bin_y
 ```
 
-每个入口脚本顶部都有完整 `SCRIPT_DEFAULTS`。常用方式是直接编辑脚本中的默认值，然后运行脚本。
+对 `grbfind-bin3.py`：
 
-仍然可以用命令行覆盖参数，例如：
+```text
+spatial_bin_rows = 3
+spatial_bin_cols = 3
 
-```bash
-conda run -n etbase python scripts/grbfind.py \
-  --input-run /path/to/run \
-  --output-dir /path/to/output \
-  --max-windows 3
+detector_x = 3 * bin_x + 1
+detector_y = 3 * bin_y + 1
 ```
+
+3x3 输出位置是对应 3x3 原始像素 block 的中心。
+
+## 12. 跨窗口候选关联
+
+跨窗口候选关联由显式开关控制：
+
+```text
+previous_block_match_check = False
+```
+
+当前三份入口脚本默认关闭该开关。关闭时，流水线不构建上一窗口候选 KD-tree，不做跨窗口匹配，也不会因为跨窗口匹配而改写 `pass_single_stack`。输出字段仍保持稳定：
+
+```text
+previous_block_match_check_enabled = 0
+previous_block_match_flag = 0
+track_length = 1
+```
+
+启用 `previous_block_match_check = True` 后，流水线只保留上一检测窗口的 final 候选元数据：
+
+```text
+x
+y
+frame_start
+frame_end
+track_length
+```
+
+当前窗口候选会用 KD-tree 查找上一窗口 final 候选中最近的点。若距离满足：
+
+```text
+distance <= previous_match_radius_px
+```
+
+当前：
+
+```text
+previous_match_radius_px = 2.0
+```
+
+则该候选标记为跨窗口匹配，并更新：
+
+```text
+previous_block_match_flag = 1
+previous_block_match_dist_px = distance
+track_length = previous_track_length + 1
+candidate_priority = confirmed_previous_block
+```
+
+启用时，如果一个候选与上一检测窗口 final 候选匹配，代码会把该候选的 `pass_single_stack` 设为 `1`，因此它会影响 final 候选选择。当前默认关闭，所以跨窗口关联不参与 final 决策。
+
+若没有跨窗口匹配：
+
+```text
+previous_block_match_flag = 0
+track_length = 1
+candidate_priority = single_block_psf_like
+```
+
+该状态缓存只保存元数据，不保存图像、cutout 或整帧数据。
+
+## 13. final 候选输出
+
+当前交付配置中，候选只要通过 residual 连通域检测和 residual 初筛，就进入 final 候选表。
+
+若单个检测窗口的 final 候选数超过：
+
+```text
+max_final_candidates_per_window = 5000
+```
+
+则按以下键降序排序，并只保留前 5000 个：
+
+```text
+residual_flux
+residual_peak_value
+```
+
+当前实际测试数据中候选数量远小于该上限。
 
 ## 输出文件
 
-每次运行会写出：
+每次运行会在 `output_dir` 下写出：
 
 ```text
 streaming_sum_candidates_after_measurement.csv
@@ -179,117 +628,90 @@ streaming_sum_summary.csv
 manifest.json
 ```
 
-如果启用 `template_match_sources = True`，还会写出：
+### `streaming_sum_candidates_after_measurement.csv`
+
+记录 residual 初筛后、写 final 前的候选。当前配置下，它与 final 表的行数通常一致。
+
+载荷实现方重点字段：
+
+| 字段                             | 含义                                    |
+| -------------------------------- | --------------------------------------- |
+| `frame_start`                  | 检测窗口起始帧，闭区间                  |
+| `frame_end`                    | 检测窗口结束帧，闭区间                  |
+| `window_frame_count`           | 当前窗口帧数，通常为 12                 |
+| `x`                            | 探测器坐标 x                            |
+| `y`                            | 探测器坐标 y                            |
+| `bin_x`                        | 检测网格 x                              |
+| `bin_y`                        | 检测网格 y                              |
+| `source_peak_value`            | 当前窗口求和图在候选峰值位置的值        |
+| `residual_peak_value`          | residual 连通域峰值                     |
+| `residual_flux`                | 扣除 residual 背景后的连通域总通量      |
+| `residual_npix`                | residual 连通域像素数                   |
+| `flux_peak_ratio`              | `residual_flux / residual_peak_value` |
+| `previous_block_match_check_enabled` | 是否启用跨窗口关联开关             |
+| `previous_block_match_flag`    | 是否与上一检测窗口候选关联              |
+| `previous_block_match_dist_px` | 与上一检测窗口候选的距离                |
+| `track_length`                 | 跨窗口连续关联长度                      |
+| `candidate_priority`           | 当前候选优先级标记                      |
+| `pass_single_stack`            | 是否进入 final 表                       |
+
+### `streaming_sum_transient_candidates.csv`
+
+记录最终输出候选。当前交付配置下，final 候选由 residual 前序链路决定。
+
+### `streaming_sum_summary.csv`
+
+每个检测窗口一行，记录该窗口候选数量：
+
+| 字段                         | 含义                     |
+| ---------------------------- | ------------------------ |
+| `frame_start`              | 检测窗口起始帧           |
+| `frame_end`                | 检测窗口结束帧           |
+| `window_frame_count`       | 窗口帧数                 |
+| `template_frame_start`     | 模板窗口起始帧           |
+| `template_frame_end`       | 模板窗口结束帧           |
+| `initial_sources`          | residual 连通域候选数    |
+| `after_residual_prefilter` | residual 初筛后候选数    |
+| `previous_block_matches`   | 与上一窗口关联的候选数   |
+| `after_measurement`        | 写入 measured 表的候选数 |
+| `final_candidates`         | 写入 final 表的候选数    |
+
+### `manifest.json`
+
+记录运行配置和总计数。实现方重点检查：
 
 ```text
-template_sources.csv
+input_shape
+detection_shape
+cropped_input_shape
+spatial_bin_rows
+spatial_bin_cols
+template_strategy
+window_size
+stride
+residual_threshold_sigma
+residual_min_npix
+residual_max_npix
+min_residual_peak_value
+min_residual_flux
+min_flux_peak_ratio
+previous_block_match_check
+previous_match_radius_px
+max_final_candidates_per_window
+windows_processed
+all_windows_including_template
+candidates_after_measurement
+final_candidates
 ```
 
-`manifest.json` 记录运行配置和总计数；`streaming_sum_summary.csv` 是每个检测窗口的摘要；`streaming_sum_transient_candidates.csv` 是最终候选表。
+## 当前 120 帧实测候选数
 
-## 实际数据 1x1 单块烟测结果
+使用默认输入 run 和当前配置，全 120 帧结果如下：
 
-最近一次实际 injected 全帧数据烟测使用 `scripts/grbfind.py` 默认 `max_windows = 2`，未显式传 `--max-windows` 或 `--template-strategy`。
+| 链路                    | 检测窗口数 | measured candidates | final candidates |
+| ----------------------- | ---------: | ------------------: | ---------------: |
+| `grbfind.py` 1x1      |          9 |                  14 |               14 |
+| `grbfind-bin2.py` 2x2 |          9 |                  14 |               14 |
+| `grbfind-bin3.py` 3x3 |          9 |                  15 |               15 |
 
-输出目录：
-
-```text
-/home/cxgao/Results/GRB/grb_search/main_rd_g17_120x10s_grb_seed20260529_1x1_default_oneblock_smoke_20260530_temporal_off
-```
-
-关键结果：
-
-```text
-template_strategy = rolling-previous
-template_window = [0, 11]
-detection window = 12-23
-spatial_bin = 1x1
-windows_processed = 1
-all_windows_including_template = 2
-candidates_after_measurement = 1
-final_candidates = 1
-truth_matched_final_candidates = 1
-```
-
-命中的 truth：
-
-```text
-truth_event_id = 6
-x = 942
-y = 7441
-truth_dist_px = 0.49592883990681813
-residual_flux = 3611813
-```
-
-## 参数说明
-
-以下参数都在三个脚本的 `SCRIPT_DEFAULTS` 中显式列出。
-
-| 参数                                | `grbfind.py` 默认值  | 作用                                                                             |
-| ----------------------------------- | ---------------------- | -------------------------------------------------------------------------------- |
-| `input_run`                       | `DEFAULT_INPUT_RUN`  | 输入 run 目录，内部应包含 `frames/frame_*.npy`。                               |
-| `template_run`                    | `None`               | 外部模板 run。为 `None` 时使用输入 run 自身按 `template_strategy` 生成模板。 |
-| `output_dir`                      | `DEFAULT_OUTPUT_DIR` | 输出目录。目录已存在且 `overwrite=False` 时会报错。                            |
-| `truth_events_csv`                | `None`               | truth 事件表路径。为 `None` 时自动尝试读取 `<input_run>/events.csv`。        |
-| `truth_match_radius_px`           | `12.0`               | truth matching 的最大距离，单位为原图像素。                                      |
-| `spatial_bin`                     | `"1x1"`              | 空间非重叠 bin 设置。可写成 `"N"` 或 `"RxC"`。                               |
-| `window_size`                     | `12`                 | 每个检测窗口求和的帧数。                                                         |
-| `stride`                          | `12`                 | 相邻窗口起点的帧步长。                                                           |
-| `max_windows`                     | `2`                  | 最多纳入的原始窗口数，包含模板种子窗口。默认只检测一个块。                       |
-| `template_strategy`               | `"rolling-previous"` | 无外部模板时的模板策略。可选 `"rolling-previous"` 或 `"first-window"`。      |
-| `tile_size`                       | `1024`               | 流式处理时的 core tile 尺寸，单位为检测网格像素。                                |
-| `halo`                            | `12`                 | tile 外扩边界，用于 cutout 和连通域边界安全处理。                                |
-| `input_bit_depth`                 | `16`                 | 输入整数帧的位深检查。                                                           |
-| `max_filter_size`                 | `7`                  | 模板星源诊断检测中的局部极大值滤波尺寸。                                         |
-| `source_threshold_sigma`          | `4.0`                | 模板星源诊断检测阈值，只在模板星源 catalog 启用时使用。                          |
-| `residual_threshold_sigma`        | `3.0`                | residual 图中像素进入候选连通域前需超过背景的 sigma 数。                         |
-| `residual_min_npix`               | `50`                 | residual 连通域最小像素数。                                                      |
-| `residual_max_npix`               | `400`                | residual 连通域最大像素数。                                                      |
-| `min_residual_peak_value`         | `50000`              | residual 初筛所需最小峰值。                                                      |
-| `min_residual_flux`               | `0`                  | residual 初筛所需最小总通量。                                                    |
-| `min_flux_peak_ratio`             | `3.0`                | residual 总通量与峰值的最小比值，用于排除过尖候选。                              |
-| `match_radius_px`                 | `0.75`               | 模板星源匹配半径，用于标注候选是否靠近模板源。                                   |
-| `cut_half`                        | `9`                  | 局部形态 cutout 半宽；实际 cutout 尺寸约为 `2 * cut_half + 1`。                |
-| `annulus_r_in`                    | `6.0`                | 局部背景环内半径。                                                               |
-| `annulus_r_out`                   | `10.0`               | 局部背景环外半径。                                                               |
-| `local_threshold_sigma`           | `3.0`                | 局部 residual 连通域阈值。                                                       |
-| `seed_radius`                     | `1.5`                | 在局部 cutout 中选择候选对应连通域的种子半径。                                   |
-| `peak_pixel_snr_check`            | `False`              | 是否启用局部 peak SNR final gate。关闭时 residual 前序通过的候选直接进入 final。 |
-| `effective_npix_threshold`        | `4`                  | `peak_pixel_snr_check=True` 时，局部连通域所需的最小像素数。                    |
-| `peak_pixel_snr_threshold`        | `5.0`                | `peak_pixel_snr_check=True` 时的局部残差峰值显著性阈值。                         |
-| `temporal_cut_half`               | `5`                  | 时间支持 cutout 半宽。                                                           |
-| `temporal_aperture_radius`        | `3.0`                | 时间序列 aperture flux 半径。                                                    |
-| `temporal_annulus_r_in`           | `5.0`                | 时间序列背景环内半径。                                                           |
-| `temporal_annulus_r_out`          | `8.0`                | 时间序列背景环外半径。                                                           |
-| `temporal_sigma`                  | `3.0`                | 判定某帧 temporal flux active 的 sigma 阈值。                                    |
-| `temporal_min_active_frames`      | `2`                  | 候选优先级标注所需的 active 帧数。                                               |
-| `cosmic_single_frame_fraction`    | `0.80`               | 单帧 flux 占比超过该值时更像宇宙线。                                             |
-| `cosmic_max_active_frames`        | `1`                  | active 帧数不超过该值且单帧占比过高时标记为 `likely_cosmic_ray`。              |
-| `previous_match_radius_px`        | `2.0`                | 与上一检测块 final 候选做位置关联的半径。                                        |
-| `template_match_sources`          | `False`              | 是否构建并输出模板星源 catalog，以及标注候选最近模板源。                         |
-| `local_shape_check`               | `True`               | 是否执行局部形态重测。                                                           |
-| `temporal_check`                  | `False`              | 是否执行逐帧时间支持测量。                                                       |
-| `keep_all_residual_candidates`    | `False`              | 是否跳过 residual flux/peak 初筛和 final gate，把 residual 连通域候选写入 final 表。 |
-| `max_final_candidates_per_window` | `5000`               | 每个检测窗口最多保留的 final 候选数。`<=0` 表示不限制。                        |
-| `overwrite`                       | `False`              | 输出目录存在时是否允许覆盖。                                                     |
-
-`grbfind-bin2.py` 和 `grbfind-bin3.py` 的参数表相同，但针对空间 bin 后的 residual 尺度有不同默认阈值：
-
-```text
-grbfind-bin2.py: spatial_bin = "2x2", output_dir = DEFAULT_OUTPUT_DIR + "_bin2"
-grbfind-bin3.py: spatial_bin = "3x3", output_dir = DEFAULT_OUTPUT_DIR + "_bin3"
-```
-
-```text
-grbfind-bin2.py:
-  residual_min_npix = 12
-  min_residual_peak_value = 250000
-  min_residual_flux = 0
-  min_flux_peak_ratio = 2.0
-
-grbfind-bin3.py:
-  residual_min_npix = 6
-  min_residual_peak_value = 250000
-  min_residual_flux = 1000000
-  min_flux_peak_ratio = 1.5
-```
+3x3 链路多出的 1 行来自同一事件在相邻检测窗口中重复出现；唯一候选事件数量与 1x1、2x2 链路一致。当前默认关闭跨窗口关联，因此该重复行不是由关联逻辑额外生成的。

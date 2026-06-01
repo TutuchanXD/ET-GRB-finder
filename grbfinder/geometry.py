@@ -88,6 +88,18 @@ def iter_core_tiles(shape: tuple[int, int], tile_size: int) -> Iterable[tuple[in
             yield row0, row1, col0, col1
 
 
+def iter_detection_tiles(
+    shape: tuple[int, int],
+    tile_size: int,
+    use_tiles: bool = True,
+) -> Iterable[tuple[int, int, int, int]]:
+    if not use_tiles:
+        n_rows, n_cols = shape
+        yield 0, n_rows, 0, n_cols
+        return
+    yield from iter_core_tiles(shape, tile_size)
+
+
 def expand_tile(
     row0: int,
     row1: int,

@@ -12,6 +12,7 @@ notebook/
 
 # Local planning/spec drafts
 docs/superpowers/
+docs/assets/
 
 # Runtime outputs should live under /home/cxgao/Results/GRB.
 Results/

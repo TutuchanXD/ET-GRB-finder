@@ -557,7 +557,7 @@ peak_pixel_snr_threshold  = 5.0
 - `peak_pixel_snr >= 5.0`：开启可选 gate 时，要求局部残差峰值相对局部 robust sigma 足够显著。
 - `peak_pixel_snr` 不是物理 SNR，只是局部残差显著性指标。
 
-previous-window 关联在该 gate 之后执行。如果当前候选与上一检测窗口的 final 候选距离小于 `previous_match_radius_px`，会被保留并标记为 `confirmed_previous_block`。
+previous-window 关联由 `previous_block_match_check` 控制，默认关闭。启用后，如果当前候选与上一检测窗口的 final 候选距离小于 `previous_match_radius_px`，会被保留并标记为 `confirmed_previous_block`。
 
 ## 12.1 Residual 之后的显式检查开关
 
@@ -566,6 +566,7 @@ Residual 候选检测之后的检查可以显式关闭，用于评估星上算�
 ```text
 --no-local-shape-check
 --no-temporal-check
+--previous-block-match-check / --no-previous-block-match-check
 --keep-all-residual-candidates
 ```
 
@@ -573,6 +574,7 @@ Residual 候选检测之后的检查可以显式关闭，用于评估星上算�
 
 - `--no-local-shape-check`：跳过 19x19 局部 residual 形态重测。输出字段仍保留，但 `local_excess_flux`、`peak_npix`、`peak_excess_value` 直接使用 residual 连通域的 `residual_flux`、`residual_npix`、`residual_peak_value` 填充。
 - `--no-temporal-check`：跳过逐帧 11x11 cutout 时间测量，也不计算宇宙线 advisory flag。时间字段填 0 或空序列。
+- `--previous-block-match-check`：启用跨 12 帧块候选关联。默认关闭；关闭时不构建上一块候选 KD-tree，`previous_block_match_flag=0`，`track_length=1`。
 - `--keep-all-residual-candidates`：跳过 residual peak/flux 初筛和 final peak-SNR gate，让 residual 连通域候选进入 `streaming_sum_transient_candidates.csv`。
 
 当前三份入口脚本默认执行局部 cutout 测量、关闭 temporal 测量，并保持 `keep_all_residual_candidates=False`。因此默认输出会保留 residual 初筛后的候选，除非显式开启可选的局部 peak SNR gate。
@@ -581,13 +583,13 @@ Residual 候选检测之后的检查可以显式关闭，用于评估星上算�
 
 ## 12.2 跨 12 帧块状态缓存
 
-低缓存版本只保存上一个检测块的候选元数据，不保存图像或 cutout。每条状态包含：
+该模块默认关闭。启用 `previous_block_match_check` 后，低缓存版本只保存上一个检测块的候选元数据，不保存图像或 cutout。每条状态包含：
 
 ```text
 x, y, frame_start, frame_end, track_length
 ```
 
-当前块候选会用 KD-tree 在上一块候选中查找邻近位置。默认半径：
+当前块候选会用 KD-tree 在上一块候选中查找邻近位置。匹配半径：
 
 ```text
 previous_match_radius_px = 2.0
@@ -595,6 +597,7 @@ previous_match_radius_px = 2.0
 
 输出字段：
 
+- `previous_block_match_check_enabled`
 - `previous_block_match_flag`
 - `previous_block_match_dist_px`
 - `previous_block_match_frame_start`

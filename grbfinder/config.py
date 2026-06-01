@@ -45,6 +45,7 @@ class ScreenerConfig:
     spatial_bin: SpatialBin = SpatialBin()
     window_size: int = 12
     stride: int = 12
+    use_tiles: bool = True
     tile_size: int = 1024
     halo: int = 12
     input_bit_depth: int = 16
@@ -74,6 +75,7 @@ class ScreenerConfig:
     temporal_min_active_frames: int = 2
     cosmic_single_frame_fraction: float = 0.80
     cosmic_max_active_frames: int = 1
+    previous_block_match_check: bool = False
     previous_match_radius_px: float = 2.0
     local_shape_check: bool = True
     temporal_check: bool = True

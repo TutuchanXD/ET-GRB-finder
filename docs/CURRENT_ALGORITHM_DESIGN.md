@@ -489,7 +489,7 @@ Meaning:
 - `peak_pixel_snr >= 5.0`: when the optional gate is enabled, require the local residual peak to be significant relative to the local robust sigma.
 - `peak_pixel_snr` is a local residual significance metric, not physical source SNR.
 
-Previous-window association is applied after this gate. If a current candidate matches a previous final candidate within `previous_match_radius_px`, it is kept and labeled as `confirmed_previous_block`.
+Previous-window association is controlled by `previous_block_match_check` and is disabled by default. When enabled, if a current candidate matches a previous final candidate within `previous_match_radius_px`, it is kept and labeled as `confirmed_previous_block`.
 
 ## 12.1 Explicit Post-Residual Check Switches
 
@@ -498,6 +498,7 @@ Checks after residual candidate detection can be explicitly disabled to evaluate
 ```text
 --no-local-shape-check
 --no-temporal-check
+--previous-block-match-check / --no-previous-block-match-check
 --keep-all-residual-candidates
 ```
 
