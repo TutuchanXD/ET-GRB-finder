@@ -107,28 +107,35 @@ residual_flux >= min_residual_flux
 residual_flux / residual_peak_value >= min_flux_peak_ratio
 ```
 
-### 7. 局部形态测量
+### 7. 局部 cutout 测量
 
 如果 `local_shape_check = True`，流水线会围绕候选位置截取局部 cutout，并重新计算局部背景、局部连通域面积和局部超额通量。
 
-候选可通过形态条件：
+输出字段包括：
 
 ```text
-peak_npix >= effective_npix_threshold
+local_excess_flux
+peak_npix
+peak_excess_value
+peak_pixel_snr
 ```
 
-默认阈值是 `4`，比旧脚本的硬阈值更宽松。
+这些字段默认用于诊断。`peak_npix` 不再单独作为 final 放行条件；它只在显式开启 `peak_pixel_snr_check` 时参与局部峰值显著性检查。
 
 ### 8. 最终候选选择
 
-默认不启用 `keep_all_residual_candidates`。候选满足以下任一条件即可进入 final 表：
+默认不启用 `keep_all_residual_candidates`，也不启用 `peak_pixel_snr_check`。因此通过 residual 连通域检测和 residual flux/peak 初筛的候选会直接进入 final 表。
+
+如果启用 `peak_pixel_snr_check = True`，final gate 会同时要求局部 footprint 和局部峰值显著性：
 
 ```text
 peak_npix >= effective_npix_threshold
-peak_pixel_snr >= 5
+and peak_pixel_snr >= peak_pixel_snr_threshold
 ```
 
-如果 `keep_all_residual_candidates = True`，则所有 residual 初筛后的候选都会进入 final 表。
+`peak_pixel_snr` 是局部残差峰值除以局部 robust sigma 的显著性指标，不是物理 SNR。当前三份入口脚本默认关闭该 gate。
+
+如果 `temporal_check = True`，时间支持和宇宙线字段仍会写入结果，并用于候选优先级标注；它们不是当前 final 硬门槛。如果 `keep_all_residual_candidates = True`，则绕过 residual flux/peak 初筛和 final gate，把 residual 连通域候选写入 final 表。
 
 ### 9. Truth match 仅用于地面验证
 
@@ -241,27 +248,29 @@ residual_flux = 3611813
 | `min_residual_peak_value`         | `50000`              | residual 初筛所需最小峰值。                                                      |
 | `min_residual_flux`               | `0`                  | residual 初筛所需最小总通量。                                                    |
 | `min_flux_peak_ratio`             | `3.0`                | residual 总通量与峰值的最小比值，用于排除过尖候选。                              |
-| `max_final_candidates_per_window` | `5000`               | 每个检测窗口最多保留的 final 候选数。`<=0` 表示不限制。                        |
 | `match_radius_px`                 | `0.75`               | 模板星源匹配半径，用于标注候选是否靠近模板源。                                   |
 | `cut_half`                        | `9`                  | 局部形态 cutout 半宽；实际 cutout 尺寸约为 `2 * cut_half + 1`。                |
 | `annulus_r_in`                    | `6.0`                | 局部背景环内半径。                                                               |
 | `annulus_r_out`                   | `10.0`               | 局部背景环外半径。                                                               |
 | `local_threshold_sigma`           | `3.0`                | 局部 residual 连通域阈值。                                                       |
 | `seed_radius`                     | `1.5`                | 在局部 cutout 中选择候选对应连通域的种子半径。                                   |
-| `effective_npix_threshold`        | `4`                  | 候选通过空间 footprint 条件所需的最小像素数。                                    |
+| `peak_pixel_snr_check`            | `False`              | 是否启用局部 peak SNR final gate。关闭时 residual 前序通过的候选直接进入 final。 |
+| `effective_npix_threshold`        | `4`                  | `peak_pixel_snr_check=True` 时，局部连通域所需的最小像素数。                    |
+| `peak_pixel_snr_threshold`        | `5.0`                | `peak_pixel_snr_check=True` 时的局部残差峰值显著性阈值。                         |
 | `temporal_cut_half`               | `5`                  | 时间支持 cutout 半宽。                                                           |
 | `temporal_aperture_radius`        | `3.0`                | 时间序列 aperture flux 半径。                                                    |
 | `temporal_annulus_r_in`           | `5.0`                | 时间序列背景环内半径。                                                           |
 | `temporal_annulus_r_out`          | `8.0`                | 时间序列背景环外半径。                                                           |
 | `temporal_sigma`                  | `3.0`                | 判定某帧 temporal flux active 的 sigma 阈值。                                    |
-| `temporal_min_active_frames`      | `2`                  | 候选通过时间支持条件所需的 active 帧数。                                         |
+| `temporal_min_active_frames`      | `2`                  | 候选优先级标注所需的 active 帧数。                                               |
 | `cosmic_single_frame_fraction`    | `0.80`               | 单帧 flux 占比超过该值时更像宇宙线。                                             |
 | `cosmic_max_active_frames`        | `1`                  | active 帧数不超过该值且单帧占比过高时标记为 `likely_cosmic_ray`。              |
 | `previous_match_radius_px`        | `2.0`                | 与上一检测块 final 候选做位置关联的半径。                                        |
 | `template_match_sources`          | `False`              | 是否构建并输出模板星源 catalog，以及标注候选最近模板源。                         |
 | `local_shape_check`               | `True`               | 是否执行局部形态重测。                                                           |
 | `temporal_check`                  | `False`              | 是否执行逐帧时间支持测量。                                                       |
-| `keep_all_residual_candidates`    | `False`              | 是否跳过最终 pass 条件，把所有 residual 初筛候选都写入 final 表。                |
+| `keep_all_residual_candidates`    | `False`              | 是否跳过 residual flux/peak 初筛和 final gate，把 residual 连通域候选写入 final 表。 |
+| `max_final_candidates_per_window` | `5000`               | 每个检测窗口最多保留的 final 候选数。`<=0` 表示不限制。                        |
 | `overwrite`                       | `False`              | 输出目录存在时是否允许覆盖。                                                     |
 
 `grbfind-bin2.py` 和 `grbfind-bin3.py` 的参数表相同，但针对空间 bin 后的 residual 尺度有不同默认阈值：

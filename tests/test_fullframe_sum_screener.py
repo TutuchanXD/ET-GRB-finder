@@ -40,6 +40,8 @@ EXPECTED_SCRIPT_DEFAULT_KEYS = {
     "local_threshold_sigma",
     "seed_radius",
     "effective_npix_threshold",
+    "peak_pixel_snr_check",
+    "peak_pixel_snr_threshold",
     "temporal_cut_half",
     "temporal_aperture_radius",
     "temporal_annulus_r_in",
@@ -614,6 +616,34 @@ def test_residual_prefilter_rejects_weak_or_too_spiky_candidates():
     assert mod.passes_residual_prefilter(psf_like, cfg) is True
 
 
+def test_final_gate_passes_prefiltered_candidate_when_peak_snr_check_is_disabled():
+    mod = load_module()
+    cfg = mod.ScreenerConfig(
+        effective_npix_threshold=99,
+        peak_pixel_snr_check=False,
+        temporal_check=False,
+    )
+
+    assert mod.passes_final_candidate_gate(
+        {"peak_npix": 1, "peak_pixel_snr": 0.0, "temporal_active_frames": 0},
+        cfg,
+    ) is True
+
+
+def test_peak_snr_final_gate_requires_local_area_and_snr_when_enabled():
+    mod = load_module()
+    cfg = mod.ScreenerConfig(
+        effective_npix_threshold=4,
+        peak_pixel_snr_check=True,
+        peak_pixel_snr_threshold=5.0,
+        temporal_check=False,
+    )
+
+    assert mod.passes_final_candidate_gate({"peak_npix": 3, "peak_pixel_snr": 10.0}, cfg) is False
+    assert mod.passes_final_candidate_gate({"peak_npix": 4, "peak_pixel_snr": 4.9}, cfg) is False
+    assert mod.passes_final_candidate_gate({"peak_npix": 4, "peak_pixel_snr": 5.0}, cfg) is True
+
+
 def test_window_budget_keeps_highest_flux_final_candidates():
     mod = load_module()
     cfg = mod.ScreenerConfig(max_final_candidates_per_window=2)
@@ -676,8 +706,11 @@ def test_short_script_wrappers_list_complete_adjustable_defaults():
         assert set(defaults) == EXPECTED_SCRIPT_DEFAULT_KEYS
         assert defaults["spatial_bin"] == spatial_bin
         assert str(defaults["output_dir"]).endswith(output_suffix)
-        assert defaults["max_windows"] == 2
+        assert defaults["max_windows"] is None
         assert defaults["template_strategy"] == "rolling-previous"
+        assert defaults["local_shape_check"] is False
+        assert defaults["peak_pixel_snr_check"] is False
+        assert defaults["peak_pixel_snr_threshold"] == 5.0
 
 
 def test_short_script_wrappers_default_to_rolling_previous_template_strategy(tmp_path):
@@ -715,5 +748,5 @@ def test_short_script_wrappers_default_to_rolling_previous_template_strategy(tmp
         assert manifest["template_strategy"] == "rolling-previous"
         assert manifest["spatial_bin_rows"] == bin_rows
         assert manifest["spatial_bin_cols"] == bin_cols
-        assert manifest["all_windows_including_template"] == 2
-        assert manifest["windows_processed"] == 1
+        assert manifest["all_windows_including_template"] == 3
+        assert manifest["windows_processed"] == 2

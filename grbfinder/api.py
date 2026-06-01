@@ -59,6 +59,7 @@ from .pipeline import (
     TEMPLATE_SOURCE_FIELDS,
     PipelineRequest,
     build_template_sources,
+    passes_final_candidate_gate,
     run_pipeline,
     scan_window,
 )

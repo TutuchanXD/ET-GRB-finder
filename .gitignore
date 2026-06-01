@@ -8,6 +8,7 @@ __pycache__/
 # Local/editor state
 .DS_Store
 .vscode/
+notebook/
 
 # Local planning/spec drafts
 docs/superpowers/

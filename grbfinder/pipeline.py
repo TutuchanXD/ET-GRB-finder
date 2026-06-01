@@ -69,6 +69,8 @@ MEASURED_FIELDS = [
     "local_bkg_median",
     "local_bkg_sigma",
     "peak_pixel_snr",
+    "peak_pixel_snr_check_enabled",
+    "peak_pixel_snr_threshold",
     "effective_npix_threshold",
     "local_shape_check_enabled",
     "temporal_check_enabled",
@@ -190,6 +192,21 @@ def build_template_sources(
     return xy, all_sources
 
 
+def passes_final_candidate_gate(row: dict, cfg: ScreenerConfig) -> bool:
+    if cfg.keep_all_residual_candidates:
+        return True
+    if not cfg.peak_pixel_snr_check:
+        return True
+
+    peak_npix = int(row.get("peak_npix", 0))
+    peak_pixel_snr = float(row.get("peak_pixel_snr", np.nan))
+    return bool(
+        peak_npix >= cfg.effective_npix_threshold
+        and np.isfinite(peak_pixel_snr)
+        and peak_pixel_snr >= cfg.peak_pixel_snr_threshold
+    )
+
+
 def scan_window(
     frame_paths: list[Path],
     template_frame_paths: list[Path],
@@ -288,9 +305,13 @@ def scan_window(
                 pass_single_stack = 1
             else:
                 pass_single_stack = int(
-                    npix >= cfg.effective_npix_threshold
-                    or temporal["temporal_active_frames"] >= cfg.temporal_min_active_frames
-                    or (np.isfinite(peak_pixel_snr) and peak_pixel_snr >= 5.0)
+                    passes_final_candidate_gate(
+                        {
+                            "peak_npix": npix,
+                            "peak_pixel_snr": peak_pixel_snr,
+                        },
+                        cfg,
+                    )
                 )
             rec = dict(row)
             rec.update(
@@ -312,6 +333,8 @@ def scan_window(
                     "local_bkg_median": int(local_bkg_med),
                     "local_bkg_sigma": int(local_bkg_sigma),
                     "peak_pixel_snr": peak_pixel_snr,
+                    "peak_pixel_snr_check_enabled": int(cfg.peak_pixel_snr_check),
+                    "peak_pixel_snr_threshold": float(cfg.peak_pixel_snr_threshold),
                     "effective_npix_threshold": int(cfg.effective_npix_threshold),
                     "local_shape_check_enabled": int(cfg.local_shape_check),
                     "temporal_check_enabled": int(cfg.temporal_check),
@@ -506,6 +529,8 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
         "match_radius_px": cfg.match_radius_px,
         "previous_match_radius_px": cfg.previous_match_radius_px,
         "effective_npix_threshold": cfg.effective_npix_threshold,
+        "peak_pixel_snr_check": bool(cfg.peak_pixel_snr_check),
+        "peak_pixel_snr_threshold": cfg.peak_pixel_snr_threshold,
         "template_match_sources": bool(request.template_match_sources),
         "template_source_catalog_written": template_source_catalog_written,
         "local_shape_check": bool(cfg.local_shape_check),

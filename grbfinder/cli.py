@@ -143,6 +143,17 @@ def build_parser(
         default=script_default(script_defaults, "effective_npix_threshold", 4),
     )
     parser.add_argument(
+        "--peak-pixel-snr-check",
+        action=argparse.BooleanOptionalAction,
+        default=script_default(script_defaults, "peak_pixel_snr_check", False),
+        help="Allow strong local residual peak significance to pass final selection.",
+    )
+    parser.add_argument(
+        "--peak-pixel-snr-threshold",
+        type=float,
+        default=script_default(script_defaults, "peak_pixel_snr_threshold", 5.0),
+    )
+    parser.add_argument(
         "--temporal-cut-half",
         type=int,
         default=script_default(script_defaults, "temporal_cut_half", 5),
@@ -256,6 +267,8 @@ def config_from_args(args: argparse.Namespace) -> ScreenerConfig:
         seed_radius=args.seed_radius,
         previous_match_radius_px=args.previous_match_radius_px,
         effective_npix_threshold=args.effective_npix_threshold,
+        peak_pixel_snr_check=args.peak_pixel_snr_check,
+        peak_pixel_snr_threshold=args.peak_pixel_snr_threshold,
         temporal_cut_half=args.temporal_cut_half,
         temporal_aperture_radius=args.temporal_aperture_radius,
         temporal_annulus_r_in=args.temporal_annulus_r_in,

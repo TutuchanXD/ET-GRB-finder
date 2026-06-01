@@ -36,6 +36,13 @@ def test_parse_args_accepts_template_strategy():
     assert args.template_strategy == "rolling-previous"
 
 
+def test_parse_args_accepts_peak_pixel_snr_check_switch():
+    args = parse_args(["--peak-pixel-snr-check", "--peak-pixel-snr-threshold", "7.5"])
+
+    assert args.peak_pixel_snr_check is True
+    assert args.peak_pixel_snr_threshold == 7.5
+
+
 def test_parse_args_rejects_invalid_template_strategy_as_argparse_error():
     with pytest.raises(SystemExit) as excinfo:
         parse_args(["--template-strategy", "bad"])

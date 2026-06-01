@@ -379,7 +379,7 @@ Measured fields:
 Meaning of thresholds:
 
 - `local_threshold_sigma = 3.0`: local connected-component threshold relative to annulus residual noise.
-- `effective_npix_threshold = 4`: default minimum local component area for passing the single-stack morphology test.
+- `effective_npix_threshold = 4`: minimum local component area used only when the optional local peak SNR final gate is enabled.
 
 ## 10. Temporal Support Measurement
 
@@ -426,6 +426,8 @@ Measured temporal fields:
 - `temporal_max_single_frame_fraction`: max single-frame flux divided by total flux.
 - `temporal_flux_series`: JSON list of per-frame aperture fluxes.
 
+These fields are diagnostics and priority signals. They are not part of the current final hard gate.
+
 ## 11. Cosmic-Ray Advisory Flag
 
 The cosmic-ray flag is advisory only. It is not a hard rejection.
@@ -452,30 +454,42 @@ Meaning:
 
 ## 12. Candidate Pass Logic
 
-The current final pass flag is:
+The final gate runs after residual connected-component detection, residual peak/flux prefiltering, template annotation, local cutout measurement, and optional temporal diagnostics.
+
+Default behavior is intentionally simple:
 
 ```text
-pass_single_stack =
-    peak_npix >= effective_npix_threshold
-    or temporal_active_frames >= temporal_min_active_frames
-    or peak_pixel_snr >= 5.0
+if peak_pixel_snr_check is false:
+    pass_single_stack = true
+```
+
+In other words, a candidate that survived the residual-first chain enters the final table by default. Local and temporal measurements are still written as diagnostic fields, but they do not reject candidates.
+
+When the optional local peak SNR gate is enabled, the gate requires both local footprint and local peak significance:
+
+```text
+if peak_pixel_snr_check is true:
+    pass_single_stack =
+        peak_npix >= effective_npix_threshold
+        and peak_pixel_snr >= peak_pixel_snr_threshold
 ```
 
 Defaults:
 
 ```text
+peak_pixel_snr_check = false
 effective_npix_threshold = 4
-temporal_min_active_frames = 2
-peak_pixel_snr threshold = 5.0
+peak_pixel_snr_threshold = 5.0
 ```
 
 Meaning:
 
-- `peak_npix >= 4`: local residual footprint is spatially extended enough to be star/PSF-like.
-- `temporal_active_frames >= 2`: signal has support in multiple frames, which helps against cosmic rays.
-- `peak_pixel_snr >= 5.0`: a strong peak can pass even if other criteria are weak.
+- `peak_pixel_snr_check = false`: keep residual-prefiltered candidates by default.
+- `peak_npix >= 4`: when the optional gate is enabled, require the local residual component to have at least four pixels.
+- `peak_pixel_snr >= 5.0`: when the optional gate is enabled, require the local residual peak to be significant relative to the local robust sigma.
+- `peak_pixel_snr` is a local residual significance metric, not physical source SNR.
 
-This is intentionally permissive. The onboard objective is candidate generation, not final GRB confirmation.
+Previous-window association is applied after this gate. If a current candidate matches a previous final candidate within `previous_match_radius_px`, it is kept and labeled as `confirmed_previous_block`.
 
 ## 12.1 Explicit Post-Residual Check Switches
 
@@ -491,9 +505,9 @@ Meanings:
 
 - `--no-local-shape-check`: skip 19x19 local residual morphology remeasurement. Output fields are still populated, but `local_excess_flux`, `peak_npix`, and `peak_excess_value` are filled directly from `residual_flux`, `residual_npix`, and `residual_peak_value`.
 - `--no-temporal-check`: skip per-frame 11x11 temporal cutout measurement and cosmic-ray advisory calculation. Temporal fields are filled with zeros or an empty series.
-- `--keep-all-residual-candidates`: bypass the final `peak_npix` / `temporal_active_frames` / `peak_pixel_snr` pass logic and write every residual candidate to `streaming_sum_transient_candidates.csv`.
+- `--keep-all-residual-candidates`: bypass residual peak/flux prefiltering and the final peak-SNR gate, then write every residual connected-component candidate to `streaming_sum_transient_candidates.csv`.
 
-All three switches are disabled by default, so the default behavior still runs local morphology measurement, temporal measurement, and final pass filtering.
+In the current script wrappers, local cutout measurement is enabled, temporal measurement is disabled, and `keep_all_residual_candidates` is disabled. The default output therefore keeps residual-prefiltered candidates unless the optional local peak SNR gate is explicitly enabled.
 
 These switches do not change residual-first detection. They make the post-residual confirmation checks optional. If downlink budget is sufficient but onboard compute or cache is tighter, the flight configuration can keep only residual candidates and defer confirmation to the ground.
 
@@ -732,15 +746,17 @@ The current script supports paired-template validation, fixed first-window fallb
 | `annulus_r_out` | 10.0 | Outer radius of local background annulus. |
 | `local_threshold_sigma` | 3.0 | Local residual component threshold above local background. |
 | `seed_radius` | 1.5 | Candidate seed radius for selecting the local component. |
-| `effective_npix_threshold` | 4 | Spatial footprint threshold for candidate pass. |
+| `peak_pixel_snr_check` | false | Enable the optional local peak SNR final gate. When false, residual-prefiltered candidates pass final by default. |
+| `effective_npix_threshold` | 4 | Local component area required when `peak_pixel_snr_check=true`. |
+| `peak_pixel_snr_threshold` | 5.0 | Local residual peak-significance threshold used when `peak_pixel_snr_check=true`. |
 | `temporal_cut_half` | 5 | Half-size of per-frame temporal cutout. |
 | `temporal_aperture_radius` | 3.0 | Aperture radius for per-frame flux series. |
 | `temporal_annulus_r_in` | 5.0 | Inner radius of temporal background annulus. |
 | `temporal_annulus_r_out` | 8.0 | Outer radius of temporal background annulus. |
 | `temporal_sigma` | 3.0 | Per-frame active threshold above temporal median/MAD. |
-| `temporal_min_active_frames` | 2 | Number of active frames sufficient for candidate pass. |
+| `temporal_min_active_frames` | 2 | Number of active frames used for temporal priority labeling. |
 | `cosmic_single_frame_fraction` | 0.80 | Single-frame dominance threshold for cosmic-ray advisory flag. |
 | `cosmic_max_active_frames` | 1 | Active-frame count threshold for cosmic-ray advisory flag. |
 | `--no-local-shape-check` | false | Explicitly disable local morphology remeasurement and avoid each candidate's 19x19 cutout check. |
 | `--no-temporal-check` | false | Explicitly disable per-frame temporal cutout checks. |
-| `--keep-all-residual-candidates` | false | Bypass final pass logic and write every residual candidate as final. |
+| `--keep-all-residual-candidates` | false | Bypass residual peak/flux prefiltering and final peak-SNR gate. |

@@ -64,6 +64,8 @@ class ScreenerConfig:
     local_threshold_sigma: float = 3.0
     seed_radius: float = 1.5
     effective_npix_threshold: int = 4
+    peak_pixel_snr_check: bool = False
+    peak_pixel_snr_threshold: float = 5.0
     temporal_cut_half: int = 5
     temporal_aperture_radius: float = 3.0
     temporal_annulus_r_in: float = 5.0

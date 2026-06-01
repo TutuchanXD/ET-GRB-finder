@@ -441,7 +441,7 @@ local_threshold = local_bkg_median + local_threshold_sigma * local_bkg_sigma
 阈值含义：
 
 - `local_threshold_sigma = 3.0`：局部残差连通域检测阈值。
-- `effective_npix_threshold = 4`：最终 pass 逻辑中，局部连通域像素数达到 4 就可通过空间形态条件。
+- `effective_npix_threshold = 4`：只在显式开启局部 peak SNR final gate 时使用，要求局部连通域至少有 4 个像素。
 
 ## 10. 时间支持测量
 
@@ -494,6 +494,8 @@ median(flux_series) + temporal_sigma * MAD_sigma(flux_series)
 - `temporal_max_single_frame_fraction`：最大单帧 flux 占总 flux 的比例。
 - `temporal_flux_series`：逐帧 aperture flux 的 JSON 列表。
 
+这些字段当前用于诊断和候选优先级标注，不作为 final 硬门槛。
+
 ## 11. 宇宙线 Advisory Flag
 
 当前宇宙线判断只是 advisory flag，不作为硬拒绝条件。
@@ -520,30 +522,42 @@ and temporal_max_single_frame_fraction >= 0.80
 
 ## 12. 最终候选 Pass 逻辑
 
-当前最终 pass 条件为三者取或：
+final gate 发生在 residual 连通域检测、residual peak/flux 初筛、模板标注、局部 cutout 测量和可选 temporal 诊断之后。
+
+当前默认行为是：
 
 ```text
-pass_single_stack =
-    peak_npix >= effective_npix_threshold
-    or temporal_active_frames >= temporal_min_active_frames
-    or peak_pixel_snr >= 5.0
+if peak_pixel_snr_check is false:
+    pass_single_stack = true
+```
+
+也就是说，通过 residual-first 前序链路的候选默认直接进入 final 表。局部测量和 temporal 测量仍会写入诊断字段，但默认不用于拒绝候选。
+
+如果显式开启 `peak_pixel_snr_check = true`，final gate 同时要求局部 footprint 和局部峰值显著性：
+
+```text
+if peak_pixel_snr_check is true:
+    pass_single_stack =
+        peak_npix >= effective_npix_threshold
+        and peak_pixel_snr >= peak_pixel_snr_threshold
 ```
 
 默认值：
 
 ```text
+peak_pixel_snr_check      = false
 effective_npix_threshold  = 4
-temporal_min_active_frames = 2
-peak_pixel_snr threshold  = 5.0
+peak_pixel_snr_threshold  = 5.0
 ```
 
 含义：
 
-- `peak_npix >= 4`：局部残差 footprint 足够扩展，更像星斑而不是单像素噪声。
-- `temporal_active_frames >= 2`：信号至少在两帧中有时间支持，有助于排除单帧宇宙线。
-- `peak_pixel_snr >= 5.0`：局部峰值足够强时，即使其他条件弱，也允许通过。
+- `peak_pixel_snr_check = false`：默认保留 residual 初筛后的候选。
+- `peak_npix >= 4`：开启可选 gate 时，要求局部残差连通域至少有 4 个像素。
+- `peak_pixel_snr >= 5.0`：开启可选 gate 时，要求局部残差峰值相对局部 robust sigma 足够显著。
+- `peak_pixel_snr` 不是物理 SNR，只是局部残差显著性指标。
 
-该 pass 逻辑故意偏宽松。星上只负责生成可疑候选，不负责最终确认。
+previous-window 关联在该 gate 之后执行。如果当前候选与上一检测窗口的 final 候选距离小于 `previous_match_radius_px`，会被保留并标记为 `confirmed_previous_block`。
 
 ## 12.1 Residual 之后的显式检查开关
 
@@ -559,9 +573,9 @@ Residual 候选检测之后的检查可以显式关闭，用于评估星上算�
 
 - `--no-local-shape-check`：跳过 19x19 局部 residual 形态重测。输出字段仍保留，但 `local_excess_flux`、`peak_npix`、`peak_excess_value` 直接使用 residual 连通域的 `residual_flux`、`residual_npix`、`residual_peak_value` 填充。
 - `--no-temporal-check`：跳过逐帧 11x11 cutout 时间测量，也不计算宇宙线 advisory flag。时间字段填 0 或空序列。
-- `--keep-all-residual-candidates`：跳过最终 `peak_npix` / `temporal_active_frames` / `peak_pixel_snr` pass 判断，让所有 residual 候选进入 `streaming_sum_transient_candidates.csv`。
+- `--keep-all-residual-candidates`：跳过 residual peak/flux 初筛和 final peak-SNR gate，让 residual 连通域候选进入 `streaming_sum_transient_candidates.csv`。
 
-这三个开关默认都不启用，因此默认行为仍然是执行局部形态检查、执行时间检查、再应用最终 pass 逻辑。
+当前三份入口脚本默认执行局部 cutout 测量、关闭 temporal 测量，并保持 `keep_all_residual_candidates=False`。因此默认输出会保留 residual 初筛后的候选，除非显式开启可选的局部 peak SNR gate。
 
 这些开关的设计目的不是改变 residual-first 检测本身，而是把 residual 之后的确认性检查变成可裁剪模块。若星上下传带宽足够、但算力或缓存更紧张，可以先关闭这些检查，只下传 residual 候选。
 
@@ -849,15 +863,17 @@ Residual-first 假设静态星源可以被模板干净减掉。如果指向、PS
 | `annulus_r_out` | 10.0 | 局部背景环外半径。 |
 | `local_threshold_sigma` | 3.0 | 局部 residual 连通域阈值。 |
 | `seed_radius` | 1.5 | 选择局部连通域时的候选种子半径。 |
-| `effective_npix_threshold` | 4 | 候选通过空间 footprint 条件的像素数阈值。 |
+| `peak_pixel_snr_check` | false | 是否启用局部 peak SNR final gate。关闭时 residual 初筛后的候选默认进入 final。 |
+| `effective_npix_threshold` | 4 | `peak_pixel_snr_check=true` 时要求的局部连通域最小像素数。 |
+| `peak_pixel_snr_threshold` | 5.0 | `peak_pixel_snr_check=true` 时使用的局部残差峰值显著性阈值。 |
 | `temporal_cut_half` | 5 | 逐帧时间 cutout 半宽。 |
 | `temporal_aperture_radius` | 3.0 | 逐帧 aperture flux 半径。 |
 | `temporal_annulus_r_in` | 5.0 | 逐帧背景环内半径。 |
 | `temporal_annulus_r_out` | 8.0 | 逐帧背景环外半径。 |
 | `temporal_sigma` | 3.0 | 时间序列 active 阈值的 sigma 数。 |
-| `temporal_min_active_frames` | 2 | 候选通过时间支持条件所需 active 帧数。 |
+| `temporal_min_active_frames` | 2 | 候选 temporal 优先级标注所需 active 帧数。 |
 | `cosmic_single_frame_fraction` | 0.80 | 宇宙线 advisory flag 的单帧占比阈值。 |
 | `cosmic_max_active_frames` | 1 | 宇宙线 advisory flag 的 active 帧数阈值。 |
 | `--no-local-shape-check` | false | 显式关闭局部形态重测，节省每候选 19x19 cutout 检查。 |
 | `--no-temporal-check` | false | 显式关闭逐帧时间 cutout 检查，节省每候选多帧小 cutout 读取。 |
-| `--keep-all-residual-candidates` | false | 跳过最终 pass 判断，所有 residual 候选均进入最终候选表。 |
+| `--keep-all-residual-candidates` | false | 跳过 residual peak/flux 初筛和 final peak-SNR gate。 |
