@@ -74,6 +74,12 @@ def build_parser(
         default=script_default(script_defaults, "template_strategy", default_template_strategy),
         help="Input-run template strategy when --template-run is not supplied.",
     )
+    parser.add_argument(
+        "--use-tiles",
+        action=argparse.BooleanOptionalAction,
+        default=script_default(script_defaults, "use_tiles", True),
+        help="Process each detection window in tiles; disable to run full-frame detection per window.",
+    )
     parser.add_argument("--tile-size", type=int, default=script_default(script_defaults, "tile_size", 1024))
     parser.add_argument("--halo", type=int, default=script_default(script_defaults, "halo", 12))
     parser.add_argument(
@@ -190,6 +196,12 @@ def build_parser(
         default=script_default(script_defaults, "cosmic_max_active_frames", 1),
     )
     parser.add_argument(
+        "--previous-block-match-check",
+        action=argparse.BooleanOptionalAction,
+        default=script_default(script_defaults, "previous_block_match_check", False),
+        help="Associate candidates with previous-window final candidates and mark tracks.",
+    )
+    parser.add_argument(
         "--previous-match-radius-px",
         type=float,
         default=script_default(script_defaults, "previous_match_radius_px", 2.0),
@@ -247,6 +259,7 @@ def config_from_args(args: argparse.Namespace) -> ScreenerConfig:
         spatial_bin=parse_spatial_bin(args.spatial_bin),
         window_size=args.window_size,
         stride=args.stride,
+        use_tiles=args.use_tiles,
         tile_size=args.tile_size,
         halo=args.halo,
         input_bit_depth=args.input_bit_depth,
@@ -277,6 +290,7 @@ def config_from_args(args: argparse.Namespace) -> ScreenerConfig:
         temporal_min_active_frames=args.temporal_min_active_frames,
         cosmic_single_frame_fraction=args.cosmic_single_frame_fraction,
         cosmic_max_active_frames=args.cosmic_max_active_frames,
+        previous_block_match_check=args.previous_block_match_check,
         local_shape_check=args.local_shape_check,
         temporal_check=args.temporal_check,
         keep_all_residual_candidates=args.keep_all_residual_candidates,

@@ -30,6 +30,7 @@ SCRIPT_DEFAULTS = {
 
     # Full-frame streaming and optional spatial binning.
     "spatial_bin": "3x3",
+    "use_tiles": False,
     "tile_size": 1024,
     "halo": 12,
     "input_bit_depth": 16,
@@ -73,6 +74,7 @@ SCRIPT_DEFAULTS = {
     "cosmic_max_active_frames": 1,
 
     # Cross-window association and final output policy.
+    "previous_block_match_check": False,
     "previous_match_radius_px": 2.0,
     "keep_all_residual_candidates": False,
     "max_final_candidates_per_window": 5000,

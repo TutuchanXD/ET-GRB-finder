@@ -20,7 +20,7 @@ from .geometry import (
     binned_detection_shape,
     candidate_local_xy,
     expand_tile,
-    iter_core_tiles,
+    iter_detection_tiles,
 )
 from .io import (
     default_truth_path,
@@ -78,6 +78,7 @@ MEASURED_FIELDS = [
     "temporal_consecutive_active_frames",
     "temporal_max_single_frame_fraction",
     "likely_cosmic_ray",
+    "previous_block_match_check_enabled",
     "previous_block_match_flag",
     "previous_block_match_dist_px",
     "previous_block_match_frame_start",
@@ -169,7 +170,7 @@ def build_template_sources(
     cfg: ScreenerConfig,
 ) -> tuple[np.ndarray, list[dict]]:
     all_sources: list[dict] = []
-    for row0, row1, col0, col1 in iter_core_tiles(shape, cfg.tile_size):
+    for row0, row1, col0, col1 in iter_detection_tiles(shape, cfg.tile_size, cfg.use_tiles):
         row_slice, col_slice = expand_tile(row0, row1, col0, col1, shape, cfg.halo)
         tile = sum_frame_tile(frame_paths, frame_start, frame_end, row_slice, col_slice, cfg.spatial_bin)
         sources, threshold, bkg_median, bkg_sigma = detect_sources_on_tile(
@@ -223,7 +224,7 @@ def scan_window(
     initial_sources = 0
     prefiltered_sources = 0
     matched_template_sources = 0
-    for row0, row1, col0, col1 in iter_core_tiles(shape, cfg.tile_size):
+    for row0, row1, col0, col1 in iter_detection_tiles(shape, cfg.tile_size, cfg.use_tiles):
         row_slice, col_slice = expand_tile(row0, row1, col0, col1, shape, cfg.halo)
         sum_img = sum_frame_tile(frame_paths, frame_start, frame_end, row_slice, col_slice, cfg.spatial_bin)
         template_sum_img = sum_frame_tile(
@@ -444,12 +445,17 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
                 template_frame_start=current_template_start,
                 template_frame_end=current_template_end,
             )
-            rows = annotate_previous_block_matches(
-                rows,
-                previous_window_rows,
-                cfg.previous_match_radius_px,
-            )
-            if not cfg.keep_all_residual_candidates:
+            if cfg.previous_block_match_check:
+                rows = annotate_previous_block_matches(
+                    rows,
+                    previous_window_rows,
+                    cfg.previous_match_radius_px,
+                )
+            else:
+                rows = annotate_previous_block_matches(rows, [], cfg.previous_match_radius_px)
+            for row in rows:
+                row["previous_block_match_check_enabled"] = int(cfg.previous_block_match_check)
+            if cfg.previous_block_match_check and not cfg.keep_all_residual_candidates:
                 for row in rows:
                     if int(row.get("previous_block_match_flag", 0)) == 1:
                         row["pass_single_stack"] = 1
@@ -474,16 +480,20 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
             truth_matched_final_count += int(
                 sum(row.get("truth_match_flag", 0) == 1 for row in final_rows)
             )
-            previous_window_rows = [
-                {
-                    "x": row["x"],
-                    "y": row["y"],
-                    "frame_start": row["frame_start"],
-                    "frame_end": row["frame_end"],
-                    "track_length": row.get("track_length", 1),
-                }
-                for row in final_rows
-            ]
+            previous_window_rows = (
+                [
+                    {
+                        "x": row["x"],
+                        "y": row["y"],
+                        "frame_start": row["frame_start"],
+                        "frame_end": row["frame_end"],
+                        "track_length": row.get("track_length", 1),
+                    }
+                    for row in final_rows
+                ]
+                if cfg.previous_block_match_check
+                else []
+            )
     finally:
         measured_handle.close()
         final_handle.close()
@@ -515,6 +525,7 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
         "detection_starts_after_template": bool(not paired_template),
         "window_size": cfg.window_size,
         "stride": cfg.stride,
+        "use_tiles": bool(cfg.use_tiles),
         "tile_size": cfg.tile_size,
         "halo": cfg.halo,
         "source_threshold_sigma": cfg.source_threshold_sigma,
@@ -527,6 +538,7 @@ def run_pipeline(request: PipelineRequest, cfg: ScreenerConfig) -> dict:
         "max_final_candidates_per_window": cfg.max_final_candidates_per_window,
         "local_threshold_sigma": cfg.local_threshold_sigma,
         "match_radius_px": cfg.match_radius_px,
+        "previous_block_match_check": bool(cfg.previous_block_match_check),
         "previous_match_radius_px": cfg.previous_match_radius_px,
         "effective_npix_threshold": cfg.effective_npix_threshold,
         "peak_pixel_snr_check": bool(cfg.peak_pixel_snr_check),

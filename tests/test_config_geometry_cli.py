@@ -43,6 +43,19 @@ def test_parse_args_accepts_peak_pixel_snr_check_switch():
     assert args.peak_pixel_snr_threshold == 7.5
 
 
+def test_parse_args_accepts_previous_block_match_check_switch():
+    args = parse_args(["--previous-block-match-check", "--previous-match-radius-px", "3.5"])
+
+    assert args.previous_block_match_check is True
+    assert args.previous_match_radius_px == 3.5
+
+
+def test_parse_args_accepts_use_tiles_switch():
+    args = parse_args(["--no-use-tiles"])
+
+    assert args.use_tiles is False
+
+
 def test_parse_args_rejects_invalid_template_strategy_as_argparse_error():
     with pytest.raises(SystemExit) as excinfo:
         parse_args(["--template-strategy", "bad"])

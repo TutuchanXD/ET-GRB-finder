@@ -21,6 +21,7 @@ EXPECTED_SCRIPT_DEFAULT_KEYS = {
     "stride",
     "max_windows",
     "template_strategy",
+    "use_tiles",
     "tile_size",
     "halo",
     "input_bit_depth",
@@ -50,6 +51,7 @@ EXPECTED_SCRIPT_DEFAULT_KEYS = {
     "temporal_min_active_frames",
     "cosmic_single_frame_fraction",
     "cosmic_max_active_frames",
+    "previous_block_match_check",
     "previous_match_radius_px",
     "template_match_sources",
     "local_shape_check",
@@ -357,6 +359,82 @@ def test_post_residual_checks_can_be_disabled_from_cli(tmp_path):
     assert int(row["local_excess_flux"]) == int(row["residual_flux"])
     assert int(row["peak_npix"]) == int(row["residual_npix"])
     assert row["temporal_flux_series"] == "[]"
+
+
+def test_full_frame_detection_can_disable_tile_traversal(tmp_path):
+    mod = load_module()
+    run, template = make_residual_run_pair(tmp_path)
+    out = tmp_path / "out"
+
+    rc = mod.main(
+        [
+            "--input-run",
+            str(run),
+            "--template-run",
+            str(template),
+            "--output-dir",
+            str(out),
+            "--window-size",
+            "2",
+            "--stride",
+            "2",
+            "--tile-size",
+            "1",
+            "--halo",
+            "0",
+            "--no-use-tiles",
+            "--no-local-shape-check",
+            "--no-temporal-check",
+            "--keep-all-residual-candidates",
+        ]
+    )
+
+    assert rc == 0
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["use_tiles"] is False
+    assert manifest["tile_size"] == 1
+    assert manifest["final_candidates"] == 1
+
+
+def test_previous_block_match_check_is_opt_in_for_pipeline(tmp_path):
+    mod = load_module()
+    run, template = make_residual_run_pair(tmp_path, n_frames=4)
+
+    for enabled in [False, True]:
+        out = tmp_path / ("enabled" if enabled else "disabled")
+        args = [
+            "--input-run",
+            str(run),
+            "--template-run",
+            str(template),
+            "--output-dir",
+            str(out),
+            "--window-size",
+            "2",
+            "--stride",
+            "2",
+            "--no-local-shape-check",
+            "--no-temporal-check",
+            "--keep-all-residual-candidates",
+        ]
+        if enabled:
+            args.append("--previous-block-match-check")
+
+        rc = mod.main(args)
+
+        assert rc == 0
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert manifest["previous_block_match_check"] is enabled
+        rows = list(csv.DictReader((out / "streaming_sum_transient_candidates.csv").open()))
+        assert len(rows) == 2
+        assert [row["previous_block_match_check_enabled"] for row in rows] == [
+            "1" if enabled else "0",
+            "1" if enabled else "0",
+        ]
+        assert rows[0]["previous_block_match_flag"] == "0"
+        assert rows[0]["track_length"] == "1"
+        assert rows[1]["previous_block_match_flag"] == ("1" if enabled else "0")
+        assert rows[1]["track_length"] == ("2" if enabled else "1")
 
 
 def test_rectangular_spatial_bin_writes_manifest_fields(tmp_path):
@@ -708,9 +786,11 @@ def test_short_script_wrappers_list_complete_adjustable_defaults():
         assert str(defaults["output_dir"]).endswith(output_suffix)
         assert defaults["max_windows"] is None
         assert defaults["template_strategy"] == "rolling-previous"
+        assert defaults["use_tiles"] is False
         assert defaults["local_shape_check"] is False
         assert defaults["peak_pixel_snr_check"] is False
         assert defaults["peak_pixel_snr_threshold"] == 5.0
+        assert defaults["previous_block_match_check"] is False
 
 
 def test_short_script_wrappers_default_to_rolling_previous_template_strategy(tmp_path):

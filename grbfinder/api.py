@@ -32,6 +32,7 @@ from .geometry import (
     expand_tile,
     extract_cutout,
     iter_core_tiles,
+    iter_detection_tiles,
     window_ranges,
 )
 from .io import (
