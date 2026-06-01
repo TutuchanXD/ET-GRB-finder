@@ -4,15 +4,11 @@
 
 当前算法目标是对连续全帧图像做 12 帧求和差分搜索，在完整检测网格上直接完成 residual 背景估计、阈值分割、连通域识别和候选筛选，输出可下传或进一步处理的 GRB 候选位置和时间窗口。
 
-## 流程图
+## 在轨识别算法流程
 
-![GRB finder 当前流水线](docs/assets/grbfind_pipeline.png)
+![图 3 在轨识别算法流程](docs/fig3_algorithm_flow.png)
 
-流程图源文件位于：
-
-```text
-docs/assets/grbfind_pipeline.drawio
-```
+图 3 在轨识别算法流程
 
 ## 当前入口
 
